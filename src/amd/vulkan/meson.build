@@ -195,6 +195,22 @@ if not with_platform_windows
   )
 endif
 
+radv_deps = []
+
+if with_vulkan_dx
+  libradv_files += files(
+    'winsys/wddm2/radv_wddm2_bo.c',
+    'winsys/wddm2/radv_wddm2_bo.h',
+    'winsys/wddm2/radv_wddm2_cs.c',
+    'winsys/wddm2/radv_wddm2_cs.h',
+    'winsys/wddm2/radv_wddm2_winsys.c',
+    'winsys/wddm2/radv_wddm2_winsys_public.h',
+    'winsys/wddm2/radv_wddm2_wsi.c',
+    'winsys/wddm2/radv_wddm2_wsi.h',
+  )
+  radv_deps += dep_dxheaders
+endif
+
 if amd_with_llvm
   libradv_files += files(
     'radv_llvm_helper.cpp',
@@ -208,7 +224,6 @@ subdir('bvh')
 
 subdir('layers')
 
-radv_deps = []
 radv_flags = cc.get_supported_arguments(['-Wimplicit-fallthrough', '-Wshadow'])
 
 if with_amdgpu_virtio
