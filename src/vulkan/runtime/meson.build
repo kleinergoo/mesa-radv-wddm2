@@ -68,7 +68,11 @@ if with_vulkan_dx
   if with_platform_windows
     vulkan_lite_runtime_files += files('vk_dxgi.cpp')
   endif
-  vulkan_lite_runtime_files += files('vk_dxcore.cpp')
+  vulkan_lite_runtime_files += files(
+    'vk_dxcore.cpp',
+    'vk_wddm2_monitored_fence.c',
+    'vk_wddm2_monitored_fence.h',
+  )
   vulkan_lite_runtime_deps += dep_libdxg
 endif
 

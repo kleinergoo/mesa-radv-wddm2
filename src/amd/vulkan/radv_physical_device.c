@@ -647,6 +647,9 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device 
       .KHR_external_memory_fd = pdev->info.is_amdgpu,
       .KHR_external_semaphore = true,
       .KHR_external_semaphore_fd = pdev->info.is_amdgpu,
+#ifdef _WIN32
+      .KHR_external_semaphore_win32 = true,
+#endif
       .KHR_format_feature_flags2 = true,
       .KHR_fragment_shader_barycentric = pdev->info.gfx_level >= GFX10_3,
       .KHR_fragment_shading_rate = pdev->info.gfx_level >= GFX10_3,
