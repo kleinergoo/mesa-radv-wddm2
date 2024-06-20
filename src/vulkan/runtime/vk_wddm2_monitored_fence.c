@@ -288,6 +288,9 @@ vk_wddm2_monitored_fence_wait_many(struct vk_device *device,
       } while (abs_timeout_ns <= now_ns);
    }
 
+   if (result == VK_SUCCESS)
+      result = vk_wddm2_check_device_status(device);
+
 fail_close_event:
    if (use_event)
       vk_async_event_close(async_event);
