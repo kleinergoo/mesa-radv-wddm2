@@ -29,6 +29,7 @@
 #include "vk_alloc.h"
 #include "vk_common_entrypoints.h"
 #include "vk_dispatch_trampolines.h"
+#include "vk_dxcore.h"
 #include "vk_log.h"
 #include "vk_util.h"
 #include "vk_debug_utils.h"
@@ -442,6 +443,41 @@ enumerate_drm_physical_devices_locked(struct vk_instance *instance)
    return result;
 }
 
+#ifdef HAVE_VULKAN_DX
+static VkResult
+try_add_dx_physical_device(const struct vk_dx_adapter_info *info,
+                           IUnknown *adapter, void *user_data)
+{
+   struct vk_instance *instance = user_data;
+   struct vk_physical_device *pdevice;
+   VkResult result;
+
+   result = instance->physical_devices.try_create_for_dx(instance,
+                                                        info,
+                                                        adapter,
+                                                        &pdevice);
+
+   /* Error creating the physical device, report the error. */
+   if (result != VK_SUCCESS)
+      return VK_SUCCESS;
+
+   list_addtail(&pdevice->link, &instance->physical_devices.list);
+   return VK_SUCCESS;
+}
+
+static VkResult
+enumerate_dx_physical_devices_locked(struct vk_instance *instance)
+{
+   return vk_dxcore_adapter_foreach(try_add_dx_physical_device, instance);
+}
+#else
+static VkResult
+enumerate_dx_physical_devices_locked(struct vk_instance *instance)
+{
+   return VK_SUCCESS;
+}
+#endif
+
 static VkResult
 enumerate_physical_devices_locked(struct vk_instance *instance)
 {
@@ -455,6 +491,14 @@ enumerate_physical_devices_locked(struct vk_instance *instance)
 
    if (instance->physical_devices.try_create_for_drm) {
       result = enumerate_drm_physical_devices_locked(instance);
+      if (result != VK_SUCCESS) {
+         destroy_physical_devices(instance);
+         return result;
+      }
+   }
+
+   if (instance->physical_devices.try_create_for_dx) {
+      result = enumerate_dx_physical_devices_locked(instance);
       if (result != VK_SUCCESS) {
          destroy_physical_devices(instance);
          return result;
