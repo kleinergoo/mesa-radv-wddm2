@@ -318,7 +318,8 @@ struct radeon_winsys {
 
    void (*dump_bo_log)(struct radeon_winsys *ws, FILE *file);
 
-   int (*get_fd)(struct radeon_winsys *ws);
+   int (*get_drm_fd)(struct radeon_winsys *ws);
+   uint32_t (*get_wddm2_handle)(struct radeon_winsys *ws);
 
    const struct vk_sync_type *const *(*get_sync_types)(struct radeon_winsys *ws);
 

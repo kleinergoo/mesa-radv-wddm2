@@ -149,7 +149,7 @@ radv_amdgpu_winsys_destroy(struct radeon_winsys *rws)
 }
 
 static int
-radv_amdgpu_winsys_get_fd(struct radeon_winsys *rws)
+radv_amdgpu_winsys_get_drm_fd(struct radeon_winsys *rws)
 {
    struct radv_amdgpu_winsys *ws = (struct radv_amdgpu_winsys *)rws;
    return ws->fd;
@@ -329,7 +329,7 @@ radv_amdgpu_winsys_create(int fd, uint64_t debug_flags, uint64_t perftest_flags,
    ws->base.read_registers = radv_amdgpu_winsys_read_registers;
    ws->base.query_gpuvm_fault = radv_amdgpu_winsys_query_gpuvm_fault;
    ws->base.destroy = radv_amdgpu_winsys_destroy;
-   ws->base.get_fd = radv_amdgpu_winsys_get_fd;
+   ws->base.get_drm_fd = radv_amdgpu_winsys_get_drm_fd;
    ws->base.get_sync_types = radv_amdgpu_winsys_get_sync_types;
    ws->base.get_sync_provider = radv_amdgpu_winsys_get_sync_provider;
    ws->base.copy_sync_payloads = vk_drm_syncobj_copy_payloads;
