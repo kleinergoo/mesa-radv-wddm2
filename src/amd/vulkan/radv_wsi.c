@@ -77,15 +77,23 @@ radv_init_wsi(struct radv_physical_device *pdev)
 {
    const struct radv_instance *instance = radv_physical_device_instance(pdev);
 
+#ifdef _WIN32
+   bool sw = false;
+#else
+   bool sw = true;
+#endif
+
    VkResult result =
       wsi_device_init(&pdev->wsi_device, radv_physical_device_to_handle(pdev), radv_wsi_proc_addr, &instance->vk.alloc,
-                      pdev->master_fd, &instance->drirc.options, &(struct wsi_device_options){.sw_device = false});
+                      pdev->master_fd, &instance->drirc.options, &(struct wsi_device_options){.sw_device = sw});
    if (result != VK_SUCCESS)
       return result;
 
+#if 0
    pdev->wsi_device.supports_modifiers = pdev->info.gfx_level >= GFX9;
    pdev->wsi_device.set_memory_ownership = radv_wsi_set_memory_ownership;
    pdev->wsi_device.get_blit_queue = radv_wsi_get_prime_blit_queue;
+#endif
 
    wsi_device_setup_syncobj_fd(&pdev->wsi_device, pdev->local_fd);
 

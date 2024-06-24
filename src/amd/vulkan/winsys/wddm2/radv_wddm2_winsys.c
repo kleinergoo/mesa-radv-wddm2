@@ -53,6 +53,11 @@
 
 #include <locale.h>
 
+/* Xlib headers conflict with DXGI headers */
+#ifdef Status
+#undef Status
+#endif
+
 /* Windows headers need to be included dead last because they have lots of
  * #defines which may mess with other included headers.
  */
