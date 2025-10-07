@@ -657,7 +657,7 @@ radv_amdgpu_cs_add_buffer(struct ac_cmdbuf *_cs, struct radeon_winsys_bo *_bo)
    if (bo->base.is_virtual)
       return;
 
-   radv_amdgpu_cs_add_buffer_internal(cs, bo->bo_handle, bo->priority);
+   radv_amdgpu_cs_add_buffer_internal(cs, bo->base.handle, bo->priority);
 }
 
 /**
@@ -904,8 +904,8 @@ static unsigned
 radv_amdgpu_copy_global_bo_list(struct radv_amdgpu_winsys *ws, struct drm_amdgpu_bo_list_entry *handles)
 {
    for (uint32_t i = 0; i < ws->global_bo_list.count; i++) {
-      handles[i].bo_handle = ws->global_bo_list.bos[i]->bo_handle;
-      handles[i].bo_priority = ws->global_bo_list.bos[i]->priority;
+      handles[i].bo_handle = ws->global_bo_list.bos[i]->handle;
+      handles[i].bo_priority = radv_amdgpu_winsys_bo(ws->global_bo_list.bos[i])->priority;
    }
 
    return ws->global_bo_list.count;
@@ -1330,14 +1330,10 @@ radv_amdgpu_winsys_get_cpu_addr(void *_cs, uint64_t addr, struct ac_addr_info *i
    memset(info, 0, sizeof(struct ac_addr_info));
 
    if (cs->ws->debug_log_bos) {
-      u_rwlock_rdlock(&cs->ws->log_bo_list_lock);
-      list_for_each_entry_rev (struct radv_amdgpu_winsys_bo_log, bo_log, &cs->ws->log_bo_list, list) {
-         if (addr >= bo_log->va && addr - bo_log->va < bo_log->size) {
-            info->use_after_free = bo_log->destroyed;
-            break;
-         }
-      }
-      u_rwlock_rdunlock(&cs->ws->log_bo_list_lock);
+      bool destroyed = false;
+
+      if (radv_winsys_bo_log_find(&cs->ws->bo_log, addr, &destroyed))
+         info->use_after_free = destroyed;
    }
 
    if (info->use_after_free)
@@ -1358,20 +1354,11 @@ radv_amdgpu_winsys_get_cpu_addr(void *_cs, uint64_t addr, struct ac_addr_info *i
          }
       }
    }
-   u_rwlock_rdlock(&cs->ws->global_bo_list.lock);
-   for (uint32_t i = 0; i < cs->ws->global_bo_list.count; i++) {
-      struct radv_amdgpu_winsys_bo *bo = cs->ws->global_bo_list.bos[i];
-      if (addr >= bo->base.va && addr - bo->base.va < bo->base.size) {
-         void *map = radv_buffer_map(&cs->ws->base, &bo->base);
-         if (map) {
-            u_rwlock_rdunlock(&cs->ws->global_bo_list.lock);
-            info->valid = true;
-            info->cpu_addr = (char *)map + (addr - bo->base.va);
-            return;
-         }
-      }
+
+   if (radv_winsys_bo_list_get_cpu_addr(&cs->ws->global_bo_list, &cs->ws->base, addr, &info->cpu_addr)) {
+      info->valid = true;
+      return;
    }
-   u_rwlock_rdunlock(&cs->ws->global_bo_list.lock);
 
    return;
 }
@@ -1813,7 +1800,7 @@ radv_amdgpu_cs_submit(struct radv_amdgpu_ctx *ctx, struct radv_amdgpu_cs_request
        *   QWORD[3]: preempted then reset
        */
       uint32_t offset = (request->ip_type * MAX_RINGS_PER_TYPE + request->ring) * 4;
-      ac_drm_cs_chunk_fence_info_to_data(radv_amdgpu_winsys_bo(ctx->fence_bo)->bo_handle, offset, &chunk_data[i]);
+      ac_drm_cs_chunk_fence_info_to_data(ctx->fence_bo->handle, offset, &chunk_data[i]);
    }
 
    if (sem_info->cs_emit_wait &&

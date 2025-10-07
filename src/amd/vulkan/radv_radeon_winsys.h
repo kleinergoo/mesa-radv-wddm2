@@ -162,6 +162,7 @@ struct radeon_bo_metadata {
 struct radeon_winsys_ctx;
 
 struct radeon_winsys_bo {
+   uint32_t handle;
    uint64_t va;
    uint64_t size;
    /* buffer is created with AMDGPU_GEM_CREATE_VM_ALWAYS_VALID */

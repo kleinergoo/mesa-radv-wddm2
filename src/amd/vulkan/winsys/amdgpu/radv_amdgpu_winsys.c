@@ -10,6 +10,7 @@
 #include "radv_amdgpu_winsys.h"
 #include <assert.h>
 #include <stdio.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include "drm-uapi/amdgpu_drm.h"
@@ -137,16 +138,12 @@ radv_amdgpu_winsys_destroy(struct radeon_winsys *rws)
    if (!destroy)
       return;
 
-   u_rwlock_destroy(&ws->global_bo_list.lock);
-   free(ws->global_bo_list.bos);
+   radv_winsys_bo_list_destroy(&ws->global_bo_list);
+   radv_winsys_bo_log_destroy(&ws->bo_log);
 
    ac_drm_cs_destroy_syncobj(ws->dev, ws->vm_timeline_syncobj);
    simple_mtx_destroy(&ws->vm_ioctl_lock);
 
-   if (ws->bo_history_logfile)
-      fclose(ws->bo_history_logfile);
-
-   u_rwlock_destroy(&ws->log_bo_list_lock);
    ac_drm_device_deinitialize(ws->dev);
    FREE(rws);
 }
@@ -295,12 +292,6 @@ radv_amdgpu_winsys_create(int fd, uint64_t debug_flags, uint64_t perftest_flags,
    ws->debug_log_bos = debug_flags & RADV_DEBUG_HANG;
    ws->dump_ibs = !!(debug_flags & RADV_DEBUG_DUMP_IBS);
 
-   if (debug_flags & RADV_DEBUG_DUMP_BO_HISTORY) {
-      ws->bo_history_logfile = fopen("/tmp/radv_bo_history.log", "w+");
-      if (!ws->bo_history_logfile)
-         fprintf(stderr, "radv/amdgpu: Failed to create /tmp/radv_bo_history.log.\n");
-   }
-
    int num_sync_types = 0;
 
    ws->syncobj_sync_type = vk_drm_syncobj_get_type_from_provider(ac_drm_device_get_sync_provider(dev));
@@ -330,9 +321,8 @@ radv_amdgpu_winsys_create(int fd, uint64_t debug_flags, uint64_t perftest_flags,
    ws->perftest = perftest_flags;
    ws->zero_all_vram_allocs = debug_flags & RADV_DEBUG_ZERO_VRAM;
    ws->debug_vm = debug_flags & RADV_DEBUG_VM;
-   u_rwlock_init(&ws->global_bo_list.lock);
-   list_inithead(&ws->log_bo_list);
-   u_rwlock_init(&ws->log_bo_list_lock);
+   radv_winsys_bo_list_init(&ws->global_bo_list);
+   radv_winsys_bo_log_init(&ws->bo_log, debug_flags);
    ws->base.query_info = radv_amdgpu_winsys_query_info;
    ws->base.query_value = radv_amdgpu_winsys_query_value;
    ws->base.read_registers = radv_amdgpu_winsys_read_registers;
