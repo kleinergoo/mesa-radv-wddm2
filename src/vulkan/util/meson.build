@@ -65,6 +65,7 @@ vk_physical_device_features_gen = files('vk_physical_device_features_gen.py')
 vk_physical_device_properties_gen = files('vk_physical_device_properties_gen.py')
 vk_physical_device_spirv_caps_gen = files('vk_physical_device_spirv_caps_gen.py')
 vk_synchronization_helpers_gen = files('vk_synchronization_helpers_gen.py')
+vk_wddm2_dispatch_table_gen = files('vk_wddm2_dispatch_table_gen.py')
 
 files_vulkan_util = files(
   'vk_alloc.c',
