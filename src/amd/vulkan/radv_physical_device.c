@@ -2364,16 +2364,15 @@ static VkResult
 radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm_device,
                                 struct radv_physical_device **pdev_out)
 {
-#ifdef _WIN32
-   assert(drm_device == NULL);
-   return VK_ERROR_INCOMPATIBLE_DRIVER;
-#else
    VkResult result;
    int fd = -1;
    int master_fd = -1;
    bool is_virtio = false;
 
    if (drm_device) {
+#ifdef _WIN32
+      UNREACHABLE("DRM devices should not be enumerated on Windows");
+#else
       const char *path = drm_device->nodes[DRM_NODE_RENDER];
       drmVersionPtr version;
 
@@ -2415,6 +2414,7 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
 
       if (instance->debug_flags & RADV_DEBUG_STARTUP)
          fprintf(stderr, "radv: info: Found device '%s'.\n", path);
+#endif
    }
 
    struct radv_physical_device *pdev =
@@ -2433,6 +2433,7 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
       goto fail_alloc;
    }
 
+#ifndef _WIN32
    if (drm_device) {
       result = radv_amdgpu_winsys_create(fd, instance->debug_flags, instance->perftest_flags, is_virtio, &pdev->ws);
 
@@ -2459,7 +2460,10 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
             }
          }
       }
+   }
+#endif
 
+   if (drm_device) {
       /* Allow all devices on a virtual winsys, otherwise do a basic support check. */
       if (!radv_is_gpu_supported(&pdev->info)) {
          if (instance->debug_flags & RADV_DEBUG_STARTUP)
@@ -2588,6 +2592,7 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
    radv_physical_device_get_supported_extensions(pdev, &pdev->vk.supported_extensions);
    radv_physical_device_get_features(pdev, &pdev->vk.supported_features);
 
+#ifndef _WIN32
    if (drm_device) {
       struct stat primary_stat = {0}, render_stat = {0};
 
@@ -2610,6 +2615,7 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
       }
       pdev->render_devid = render_stat.st_rdev;
    }
+#endif
 
    radv_physical_device_init_cache_key(pdev);
 
@@ -2690,7 +2696,6 @@ fail_fd:
    if (master_fd != -1)
       close(master_fd);
    return result;
-#endif
 }
 
 VkResult
