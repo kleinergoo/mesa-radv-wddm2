@@ -1808,11 +1808,13 @@ void ac_print_gpu_info(FILE *f, const struct radeon_info *info, int fd)
    fprintf(f, "    name = %s\n", ac_get_family_name(info->family));
    fprintf(f, "    marketing_name = %s\n", info->marketing_name);
 
-   char proc_fd[32];
-   char dev_filename[32] = {0};
-   snprintf(proc_fd, sizeof(proc_fd), "/proc/self/fd/%u", fd);
-   if (readlink(proc_fd, dev_filename, sizeof(dev_filename) - 1) != -1)
-     fprintf(f, "    dev_filename = %s\n", dev_filename);
+   if (fd >= 0) {
+      char proc_fd[32];
+      char dev_filename[32] = {0};
+      snprintf(proc_fd, sizeof(proc_fd), "/proc/self/fd/%u", fd);
+      if (readlink(proc_fd, dev_filename, sizeof(dev_filename) - 1) != -1)
+         fprintf(f, "    dev_filename = %s\n", dev_filename);
+   }
 
    fprintf(f, "    num_se = %i\n", info->num_se);
    fprintf(f, "    num_rb = %i\n", info->num_rb);
