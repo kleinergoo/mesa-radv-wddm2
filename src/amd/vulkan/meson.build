@@ -233,6 +233,11 @@ if radv_build_id != ''
   radv_flags += '-DRADV_BUILD_ID_OVERRIDE="' + radv_build_id + '"'
 endif
 
+radv_link_args = [ld_args_build_id, ld_args_bsymbolic, ld_args_gc_sections, vulkan_icd_link_args]
+if cc.get_id() == 'msvc'
+  radv_link_args += ['/NODEFAULTLIB:libcmt.lib']
+endif
+
 libvulkan_radeon = shared_library(
   'vulkan_radeon',
   [libradv_files, radv_entrypoints, sha1_h, radix_sort_spv, bvh_spv, radv_annotate_layer],
@@ -252,9 +257,7 @@ libvulkan_radeon = shared_library(
   ],
   c_args : [no_override_init_args, radv_flags, c_msvc_compat_args],
   cpp_args : [radv_flags, cpp_msvc_compat_args],
-  link_args : [
-    ld_args_build_id, ld_args_bsymbolic, ld_args_gc_sections, vulkan_icd_link_args,
-  ],
+  link_args : radv_link_args,
   link_depends : vulkan_icd_link_depends,
   gnu_symbol_visibility : 'hidden',
   name_prefix : host_machine.system() == 'windows' ? '' : [],
