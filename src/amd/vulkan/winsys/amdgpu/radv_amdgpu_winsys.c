@@ -23,10 +23,10 @@
 #include "vk_drm_syncobj.h"
 #include "xf86drm.h"
 
-static void
-radv_amdgpu_winsys_query_info(struct radeon_winsys *rws, struct radeon_info *gpu_info)
+static struct radeon_info *
+radv_amdgpu_winsys_query_info(struct radeon_winsys *rws)
 {
-   *gpu_info = ((struct radv_amdgpu_winsys *)rws)->info;
+   return &((struct radv_amdgpu_winsys *)rws)->info;
 }
 
 static uint64_t

@@ -2443,7 +2443,7 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
       }
 
       pdev->vk.supported_sync_types = pdev->ws->get_sync_types(pdev->ws);
-      pdev->ws->query_info(pdev->ws, &pdev->info);
+      pdev->info = *pdev->ws->query_info(pdev->ws);
 
       if (instance->vk.enabled_extensions.KHR_display) {
          master_fd = open(drm_device->nodes[DRM_NODE_PRIMARY], O_RDWR | O_CLOEXEC);
