@@ -265,6 +265,7 @@ radv_amdgpu_winsys_create(int fd, uint64_t debug_flags, uint64_t perftest_flags,
    ws->info.drm_major = drm_major;
    ws->info.drm_minor = drm_minor;
    ws->info.is_virtio = is_virtio;
+   ws->info.is_amdgpu = true;
 
    enum ac_query_gpu_info_result info_result = ac_query_gpu_info(fd, ws->dev, &ws->info, true);
    if (info_result != AC_QUERY_GPU_INFO_SUCCESS) {
