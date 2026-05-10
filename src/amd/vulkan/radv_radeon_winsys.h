@@ -23,6 +23,7 @@
 #include "ac_cmdbuf.h"
 #include "amd_family.h"
 
+struct ac_addr_info;
 struct radeon_info;
 struct vk_device;
 struct vk_sync_type;
@@ -304,6 +305,8 @@ struct radeon_winsys {
 
    void (*cs_dump)(struct ac_cmdbuf *cs, FILE *file, const int *trace_ids, int trace_id_count,
                    enum radv_cs_dump_type type);
+   
+   void (*cs_get_cpu_addr)(void *cs, uint64_t va, struct ac_addr_info *addr_info);
 
    void (*cs_annotate)(struct ac_cmdbuf *cs, const char *marker);
 
