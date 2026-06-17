@@ -403,6 +403,8 @@ ac_emit_cp_acquire_mem(struct ac_cmdbuf *cs, enum amd_gfx_level gfx_level,
                        enum amd_ip_type ip_type, uint32_t engine,
                        uint32_t gcr_cntl)
 {
+   const bool is_mec = gfx_level >= GFX7 && ip_type == AMD_IP_COMPUTE;
+
    assert(engine == V_581B_CP_PFP || engine == V_581B_CP_ME);
    assert(gcr_cntl);
 
@@ -416,14 +418,12 @@ ac_emit_cp_acquire_mem(struct ac_cmdbuf *cs, enum amd_gfx_level gfx_level,
       ac_cmdbuf_emit(PKT3(PKT3_ACQUIRE_MEM, 6, 0));
       ac_cmdbuf_emit(engine_flag);   /* which engine to use */
       ac_cmdbuf_emit(0xffffffff);    /* CP_COHER_SIZE */
-      ac_cmdbuf_emit(0x01ffffff);    /* CP_COHER_SIZE_HI */
+      ac_cmdbuf_emit(is_mec ? 0xff : 0x01ffffff);    /* CP_COHER_SIZE_HI */
       ac_cmdbuf_emit(0);             /* CP_COHER_BASE */
       ac_cmdbuf_emit(0);             /* CP_COHER_BASE_HI */
       ac_cmdbuf_emit(0x0000000A);    /* POLL_INTERVAL */
       ac_cmdbuf_emit(gcr_cntl);      /* GCR_CNTL */
    } else {
-      const bool is_mec = gfx_level >= GFX7 && ip_type == AMD_IP_COMPUTE;
-
       if (gfx_level == GFX9 || is_mec) {
          /* Flush caches and wait for the caches to assert idle. */
          ac_cmdbuf_emit(PKT3(PKT3_ACQUIRE_MEM, 5, 0) | PKT3_SHADER_TYPE_S(is_mec));
