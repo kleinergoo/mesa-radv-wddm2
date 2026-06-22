@@ -136,8 +136,9 @@ radv_amdgpu_virtual_bo_unmap(struct radv_amdgpu_winsys *ws, struct radv_amdgpu_w
 }
 
 static VkResult
-radv_amdgpu_winsys_bo_virtual_bind(struct radeon_winsys *_ws, struct radeon_winsys_bo *_parent, uint64_t offset,
-                                   uint64_t size, struct radeon_winsys_bo *_bo, uint64_t bo_offset)
+radv_amdgpu_winsys_bo_virtual_bind(struct radeon_winsys *_ws, struct radeon_winsys_ctx *_ctx, enum amd_ip_type ip_type,
+                                   struct radeon_winsys_bo *_parent, uint64_t offset, uint64_t size,
+                                   struct radeon_winsys_bo *_bo, uint64_t bo_offset)
 {
    struct radv_amdgpu_winsys *ws = radv_amdgpu_winsys(_ws);
    struct radv_amdgpu_winsys_bo *parent = (struct radv_amdgpu_winsys_bo *)_parent;
