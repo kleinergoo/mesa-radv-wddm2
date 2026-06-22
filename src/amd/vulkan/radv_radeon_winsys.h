@@ -180,6 +180,7 @@ struct radeon_winsys_bo {
 struct radv_winsys_submit_info {
    enum amd_ip_type ip_type;
    int queue_index;
+   bool is_gang;
    unsigned cs_count;
    unsigned initial_preamble_count;
    unsigned continue_preamble_count;

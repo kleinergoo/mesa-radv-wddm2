@@ -1761,6 +1761,7 @@ radv_queue_submit_normal(struct radv_queue *queue, struct vk_queue_submit *submi
          chainable = can_chain_next ? cs->b : NULL;
       }
 
+      submit.is_gang = submit_ace;
       submit.cs_count = num_submitted_cs;
       submit.initial_preamble_count = submit_ace ? num_initial_preambles : num_1q_initial_preambles;
       submit.continue_preamble_count = submit_ace ? num_continue_preambles : num_1q_continue_preambles;
