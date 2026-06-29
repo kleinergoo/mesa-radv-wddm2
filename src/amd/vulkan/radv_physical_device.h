@@ -24,6 +24,7 @@
 #include "compiler/shader_enums.h"
 #include "nir_shader_compiler_options.h"
 
+#include "vk_dx_adapter_info.h"
 #include "vk_physical_device.h"
 
 #ifndef _WIN32
@@ -291,6 +292,11 @@ uint32_t radv_find_memory_index(const struct radv_physical_device *pdev, VkMemor
 
 VkResult create_drm_physical_device(struct vk_instance *vk_instance, struct _drmDevice *device,
                                     struct vk_physical_device **out);
+
+VkResult create_dx_physical_device(struct vk_instance *vk_instance,
+                                   const struct vk_dx_adapter_info *adapter,
+                                   void *unk_adapter,
+                                   struct vk_physical_device **out);
 
 void radv_physical_device_destroy(struct vk_physical_device *vk_pdev);
 

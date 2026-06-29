@@ -310,7 +310,7 @@ with_asahi_vk = _vulkan_drivers.contains('asahi')
 with_gfxstream_vk = _vulkan_drivers.contains('gfxstream')
 with_kosmickrisp_vk = _vulkan_drivers.contains('kosmickrisp')
 with_any_vk = _vulkan_drivers.length() != 0
-with_vulkan_dx = with_microsoft_vk
+with_vulkan_dx = with_microsoft_vk or with_amd_vk
 
 with_llvm = with_llvm \
   .enable_if(with_swrast_vk, error_message : 'Lavapipe Vulkan driver requires LLVM') \

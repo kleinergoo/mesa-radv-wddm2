@@ -40,6 +40,7 @@ typedef void *drmDevicePtr;
 #include "util/os_drm.h"
 #include "winsys/amdgpu/radv_amdgpu_winsys_public.h"
 #endif
+#include "winsys/wddm2/radv_wddm2_winsys_public.h"
 #include "git_sha1.h"
 
 #if AMD_LLVM_AVAILABLE
@@ -2371,6 +2372,7 @@ radv_is_gpu_supported(const struct radeon_info *info)
 
 static VkResult
 radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm_device,
+                                const struct vk_dx_adapter_info *wddm2_adapter,
                                 struct radv_physical_device **pdev_out)
 {
    VkResult result;
@@ -2424,6 +2426,12 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
       if (instance->debug_flags & RADV_DEBUG_STARTUP)
          fprintf(stderr, "radv: info: Found device '%s'.\n", path);
 #endif
+   } else if (wddm2_adapter) {
+      /* TODO: Check PCI info to make sure we're a GCN or RDNA card */
+
+      if (instance->debug_flags & RADV_DEBUG_STARTUP)
+         fprintf(stderr, "radv: info: Found compatible device 0x%x:0x%x.\n",
+                 wddm2_adapter->adapter_luid.LowPart, wddm2_adapter->adapter_luid.HighPart);
    }
 
    struct radv_physical_device *pdev =
@@ -2451,9 +2459,6 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
          goto fail_base;
       }
 
-      pdev->vk.supported_sync_types = pdev->ws->get_sync_types(pdev->ws);
-      pdev->info = *pdev->ws->query_info(pdev->ws);
-
       if (instance->vk.enabled_extensions.KHR_display) {
          master_fd = open(drm_device->nodes[DRM_NODE_PRIMARY], O_RDWR | O_CLOEXEC);
          if (master_fd >= 0) {
@@ -2471,8 +2476,21 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
       }
    }
 #endif
+#ifdef HAVE_VULKAN_DX
+   if (wddm2_adapter) {
+      assert(!is_virtio);
+      result = radv_wddm2_winsys_create(wddm2_adapter, instance->debug_flags, &pdev->ws);
+      if (result != VK_SUCCESS) {
+         result = vk_errorf(instance, result, "failed to initialize winsys");
+         goto fail_base;
+      }
+   }
+#endif
 
-   if (drm_device) {
+   if (drm_device || wddm2_adapter) {
+      pdev->vk.supported_sync_types = pdev->ws->get_sync_types(pdev->ws);
+      pdev->info = *pdev->ws->query_info(pdev->ws);
+
       /* Allow all devices on a virtual winsys, otherwise do a basic support check. */
       if (!radv_is_gpu_supported(&pdev->info)) {
          if (instance->debug_flags & RADV_DEBUG_STARTUP)
@@ -2727,10 +2745,23 @@ create_drm_physical_device(struct vk_instance *vk_instance, struct _drmDevice *d
       return VK_ERROR_INCOMPATIBLE_DRIVER;
 
    return radv_physical_device_try_create((struct radv_instance *)vk_instance, device,
-                                          (struct radv_physical_device **)out);
+                                          NULL, (struct radv_physical_device **)out);
 #else
    return VK_SUCCESS;
 #endif
+}
+
+VkResult
+create_dx_physical_device(struct vk_instance *vk_instance,
+                          const struct vk_dx_adapter_info *adapter,
+                          void *unk_adapter,
+                          struct vk_physical_device **out)
+{
+   if (adapter->vendor_id != ATI_VENDOR_ID)
+      return VK_ERROR_INCOMPATIBLE_DRIVER;
+
+   return radv_physical_device_try_create((struct radv_instance *)vk_instance, NULL, adapter,
+                                          (struct radv_physical_device **)out);
 }
 
 void
