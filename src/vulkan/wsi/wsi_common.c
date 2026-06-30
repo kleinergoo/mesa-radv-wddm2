@@ -445,9 +445,6 @@ configure_image(const struct wsi_swapchain *chain,
                 const struct wsi_base_image_params *params,
                 struct wsi_image_info *info)
 {
-   info->image_type = params->image_type;
-   info->color_space = pCreateInfo->imageColorSpace;
-
    switch (params->image_type) {
    case WSI_IMAGE_TYPE_CPU: {
       const struct wsi_cpu_image_params *cpu_params =
@@ -3230,6 +3227,8 @@ wsi_configure_cpu_image(const struct wsi_swapchain *chain,
                                          handle_types, info);
    if (result != VK_SUCCESS)
       return result;
+
+   info->image_type = WSI_IMAGE_TYPE_CPU;
 
    if (chain->blit.type != WSI_SWAPCHAIN_NO_BLIT) {
       wsi_configure_buffer_image(chain, pCreateInfo,

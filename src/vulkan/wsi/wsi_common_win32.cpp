@@ -517,6 +517,7 @@ wsi_dxgi_configure_image(const struct wsi_swapchain *chain,
    if (result != VK_SUCCESS)
       return result;
 
+   info->image_type = WSI_IMAGE_TYPE_DXGI;
    info->create_mem = wsi_create_dxgi_image_mem;
 
    if (chain->blit.type != WSI_SWAPCHAIN_NO_BLIT) {

@@ -850,6 +850,8 @@ wsi_metal_configure_image(const struct wsi_swapchain *chain,
    if (result != VK_SUCCESS)
       return result;
 
+   info->image_type = WSI_IMAGE_TYPE_METAL;
+
    if (chain->blit.type != WSI_SWAPCHAIN_NO_BLIT) {
       info->create.usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
       info->wsi.blit_src = true;
