@@ -1081,19 +1081,18 @@ wsi_win32_init_wsi(struct wsi_device *wsi_device,
    if (!wsi_device->sw) {
       wsi->dxgi.factory = dxgi_get_factory(WSI_DEBUG & WSI_DEBUG_DXGI);
       if (!wsi->dxgi.factory) {
-         vk_free(alloc, wsi);
-         result = VK_ERROR_INITIALIZATION_FAILED;
-         goto fail;
+         wsi_device->sw = true;
+         goto sw_fallback;
       }
       wsi->dxgi.dcomp = dcomp_get_device();
       if (!wsi->dxgi.dcomp) {
          wsi->dxgi.factory->Release();
-         vk_free(alloc, wsi);
-         result = VK_ERROR_INITIALIZATION_FAILED;
-         goto fail;
+         wsi->dxgi.factory = NULL;
+         wsi_device->sw = true;
       }
    }
 
+sw_fallback:
    wsi->base.get_support = wsi_win32_surface_get_support;
    wsi->base.get_capabilities2 = wsi_win32_surface_get_capabilities2;
    wsi->base.get_formats = wsi_win32_surface_get_formats;
