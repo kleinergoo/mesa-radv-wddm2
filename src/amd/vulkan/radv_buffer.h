@@ -36,6 +36,11 @@ VkResult radv_bo_create(struct radv_device *device, struct vk_object_base *objec
                         enum radeon_bo_domain domain, enum radeon_bo_flag flags, unsigned priority, uint64_t address,
                         bool is_internal, struct radeon_winsys_bo **out_bo);
 
+VkResult radv_bo_create_for_image(struct radv_device *device, struct vk_object_base *object, uint64_t size,
+                                  unsigned alignment, enum radeon_bo_domain domain, enum radeon_bo_flag flags,
+                                  unsigned priority, uint64_t address, bool is_internal,
+                                  struct radv_image *image, struct radeon_winsys_bo **out_bo);
+
 VkResult radv_bo_virtual_bind(struct radv_queue *queue, struct vk_object_base *object,
                               struct radeon_winsys_bo *parent, uint64_t offset, uint64_t size,
                               struct radeon_winsys_bo *bo, uint64_t bo_offset);

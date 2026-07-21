@@ -287,7 +287,7 @@ error_va_alloc:
 static VkResult
 radv_amdgpu_winsys_bo_create(struct radeon_winsys *_ws, uint64_t size, unsigned alignment,
                              enum radeon_bo_domain initial_domain, enum radeon_bo_flag flags, unsigned priority,
-                             uint64_t replay_address, struct radeon_winsys_bo **out_bo)
+                             uint64_t replay_address, struct radv_image *image, struct radeon_winsys_bo **out_bo)
 {
    struct radv_amdgpu_winsys *ws = radv_amdgpu_winsys(_ws);
    struct radv_amdgpu_winsys_bo *bo;

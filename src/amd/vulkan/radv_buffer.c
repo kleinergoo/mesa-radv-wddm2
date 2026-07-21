@@ -257,9 +257,9 @@ radv_GetBufferOpaqueCaptureDescriptorDataEXT(VkDevice device, const VkBufferCapt
 }
 
 VkResult
-radv_bo_create(struct radv_device *device, struct vk_object_base *object, uint64_t size, unsigned alignment,
+radv_bo_create_for_image(struct radv_device *device, struct vk_object_base *object, uint64_t size, unsigned alignment,
                enum radeon_bo_domain domain, enum radeon_bo_flag flags, unsigned priority, uint64_t address,
-               bool is_internal, struct radeon_winsys_bo **out_bo)
+               bool is_internal, struct radv_image *image, struct radeon_winsys_bo **out_bo)
 {
    struct radv_physical_device *pdev = radv_device_physical(device);
    struct radv_instance *instance = radv_physical_device_instance(pdev);
@@ -272,7 +272,7 @@ radv_bo_create(struct radv_device *device, struct vk_object_base *object, uint64
    if (pdev->cache_key.mitigate_smem_oob && !is_internal)
       flags |= RADEON_FLAG_VM_PAD_1PAGE;
 
-   result = ws->buffer_create(ws, size, alignment, domain, flags, priority, address, out_bo);
+   result = ws->buffer_create(ws, size, alignment, domain, flags, priority, address, image, out_bo);
    if (result != VK_SUCCESS)
       return result;
 
@@ -281,6 +281,15 @@ radv_bo_create(struct radv_device *device, struct vk_object_base *object, uint64
    vk_address_binding_report(&instance->vk, object ? object : &device->vk.base, radv_buffer_get_va(*out_bo),
                              (*out_bo)->size, VK_DEVICE_ADDRESS_BINDING_TYPE_BIND_EXT);
    return VK_SUCCESS;
+}
+
+VkResult
+radv_bo_create(struct radv_device *device, struct vk_object_base *object, uint64_t size, unsigned alignment,
+               enum radeon_bo_domain domain, enum radeon_bo_flag flags, unsigned priority, uint64_t address,
+               bool is_internal, struct radeon_winsys_bo **out_bo)
+{
+   return radv_bo_create_for_image(device, object, size, alignment, domain, flags, priority,
+                                   address, is_internal, NULL, out_bo);
 }
 
 void

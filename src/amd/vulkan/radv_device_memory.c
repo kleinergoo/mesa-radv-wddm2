@@ -279,8 +279,8 @@ radv_alloc_memory(struct radv_device *device, const VkMemoryAllocateInfo *pAlloc
          mtx_unlock(&device->overallocation_mutex);
       }
 
-      result = radv_bo_create(device, &mem->base, alloc_size, pdev->info.max_alignment, domain, flags, priority,
-                              replay_address, is_internal, &mem->bo);
+      result = radv_bo_create_for_image(device, &mem->base, alloc_size, pdev->info.max_alignment, domain, flags, priority,
+                                        replay_address, is_internal, mem->image, &mem->bo);
 
       if (result != VK_SUCCESS) {
          if (device->overallocation_disallowed) {
