@@ -244,6 +244,9 @@ struct radeon_info {
    uint32_t chip_external_rev;
    uint32_t chip_rev; /* 0 = A0, 1 = A1, etc. */
 
+   bool valid_luid;
+   uint8_t luid[8];
+
    /* Flags. */
    bool has_graphics; /* false if the chip is compute-only */
    bool has_clear_state;
