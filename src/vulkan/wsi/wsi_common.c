@@ -486,6 +486,7 @@ wsi_swapchain_init(const struct wsi_device *wsi,
                    struct wsi_swapchain *chain,
                    VkDevice _device,
                    const VkSwapchainCreateInfoKHR *pCreateInfo,
+                   uint32_t num_images,
                    const struct wsi_base_image_params *image_params,
                    const VkAllocationCallbacks *pAllocator)
 {
@@ -500,6 +501,7 @@ wsi_swapchain_init(const struct wsi_device *wsi,
    chain->wsi = wsi;
    chain->device = _device;
    chain->alloc = *pAllocator;
+   chain->image_count = num_images;
    chain->blit.type = get_blit_type(wsi, image_params, _device);
    chain->present_wait_enabled =
       device->enabled_features.presentWait ||
@@ -555,6 +557,26 @@ wsi_swapchain_init(const struct wsi_device *wsi,
                                        &chain->cmd_pools[i]);
          if (result != VK_SUCCESS)
             goto fail;
+      }
+   }
+
+   if (chain->blit.queue != NULL || wsi->blit != NULL) {
+      chain->blit.semaphores = vk_zalloc(pAllocator,
+                                         sizeof (*chain->blit.semaphores) * num_images,
+                                         sizeof (*chain->blit.semaphores),
+                                         VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
+      if (!chain->blit.semaphores) {
+         result = VK_ERROR_OUT_OF_HOST_MEMORY;
+         goto fail;
+      }
+
+      chain->blit.timeline_values = vk_zalloc(pAllocator,
+                                         sizeof (*chain->blit.timeline_values) * num_images,
+                                         sizeof (*chain->blit.timeline_values),
+                                         VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
+      if (!chain->blit.timeline_values) {
+         result = VK_ERROR_OUT_OF_HOST_MEMORY;
+         goto fail;
       }
    }
 
@@ -663,6 +685,7 @@ wsi_swapchain_finish(struct wsi_swapchain *chain)
          chain->wsi->DestroySemaphore(chain->device, chain->blit.semaphores[i], &chain->alloc);
 
       vk_free(&chain->alloc, chain->blit.semaphores);
+      vk_free(&chain->alloc, chain->blit.timeline_values);
    }
    chain->wsi->DestroySemaphore(chain->device, chain->dma_buf_semaphore,
                                 &chain->alloc);
@@ -1298,17 +1321,6 @@ wsi_CreateSwapchainKHR(VkDevice _device,
       /* We assume here that a driver exposing present_wait also exposes VK_KHR_timeline_semaphore. */
       result = wsi_device->CreateSemaphore(_device, &sem_info, alloc, &swapchain->present_id_timeline);
       if (result != VK_SUCCESS) {
-         swapchain->destroy(swapchain, alloc);
-         return VK_ERROR_OUT_OF_HOST_MEMORY;
-      }
-   }
-
-   if (swapchain->blit.queue != NULL) {
-      swapchain->blit.semaphores = vk_zalloc(alloc,
-                                         sizeof (*swapchain->blit.semaphores) * swapchain->image_count,
-                                         sizeof (*swapchain->blit.semaphores),
-                                         VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
-      if (!swapchain->blit.semaphores) {
          swapchain->destroy(swapchain, alloc);
          return VK_ERROR_OUT_OF_HOST_MEMORY;
       }
@@ -2330,7 +2342,7 @@ wsi_common_queue_present(const struct wsi_device *wsi,
           * semaphore for now.
           */
          if (separate_queue_blit) {
-            /* Create the blit semaphore if needed */
+            /* Create the blit semaphore if needed and not already created by the implementation */
             if (swapchain->blit.semaphores[image_index] == VK_NULL_HANDLE) {
                const VkSemaphoreCreateInfo sem_info = {
                   .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
@@ -2349,6 +2361,7 @@ wsi_common_queue_present(const struct wsi_device *wsi,
                .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
                .stageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                .semaphore = swapchain->blit.semaphores[image_index],
+               .value = ++swapchain->blit.timeline_values[image_index],
             };
             continue;
          }
@@ -2413,6 +2426,7 @@ wsi_common_queue_present(const struct wsi_device *wsi,
          .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
          .stageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
          .semaphore = swapchain->blit.semaphores[image_index],
+         .value = swapchain->blit.timeline_values[image_index],
       };
 
       VkCommandBufferSubmitInfo command_buffer_infos[2];

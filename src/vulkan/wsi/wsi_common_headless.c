@@ -494,8 +494,8 @@ wsi_headless_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
       image_params = &drm_params.base;
    }
 
-   result = wsi_swapchain_init(wsi_device, &chain->base, device,
-                               pCreateInfo, image_params, pAllocator);
+   result = wsi_swapchain_init(wsi_device, &chain->base, device, pCreateInfo,
+                               num_images, image_params, pAllocator);
 
    STACK_ARRAY_FINISH(mods);
    STACK_ARRAY_FINISH(mod_props);
@@ -510,7 +510,6 @@ wsi_headless_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
    chain->base.queue_present = wsi_headless_swapchain_queue_present;
    chain->base.wait_for_present = wsi_headless_swapchain_wait_for_present;
    chain->base.present_mode = wsi_swapchain_get_present_mode(wsi_device, pCreateInfo);
-   chain->base.image_count = num_images;
 
    uint32_t image = 0;
    for (; image < chain->base.image_count; image++) {

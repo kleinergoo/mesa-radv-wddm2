@@ -667,8 +667,8 @@ wsi_metal_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
    };
    struct wsi_base_image_params *params = is_sw_driver ? &cpu_params.base : &metal_params;
 
-   result = wsi_swapchain_init(wsi_device, &chain->base, device,
-                               pCreateInfo, params, pAllocator);
+   result = wsi_swapchain_init(wsi_device, &chain->base, device, pCreateInfo,
+                               num_images, params, pAllocator);
    if (result != VK_SUCCESS)
       goto fail_chain_alloc;
 
@@ -677,7 +677,6 @@ wsi_metal_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
    chain->base.acquire_next_image = wsi_metal_swapchain_acquire_next_image;
    chain->base.queue_present = wsi_metal_swapchain_queue_present;
    chain->base.present_mode = wsi_swapchain_get_present_mode(wsi_device, pCreateInfo);
-   chain->base.image_count = num_images;
    chain->extent = pCreateInfo->imageExtent;
    chain->vk_format = pCreateInfo->imageFormat;
    chain->surface = metal_surface;

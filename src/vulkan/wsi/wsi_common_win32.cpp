@@ -952,9 +952,8 @@ wsi_win32_surface_create_swapchain(
    struct wsi_base_image_params *image_params = supports_dxgi ?
       &dxgi_image_params.base : &cpu_image_params.base;
 
-   VkResult result = wsi_swapchain_init(wsi_device, &chain->base, device,
-                                        create_info, image_params,
-                                        allocator);
+   VkResult result = wsi_swapchain_init(wsi_device, &chain->base, device, create_info,
+                                        num_images, image_params, allocator);
    if (result != VK_SUCCESS) {
       u_cnd_monotonic_destroy(&chain->acquire_cond);
       mtx_destroy(&chain->acquire_mutex);
@@ -987,8 +986,6 @@ wsi_win32_surface_create_swapchain(
                                     &chain->images[image]);
       if (result != VK_SUCCESS)
          goto fail;
-
-      chain->base.image_count++;
    }
 
    *swapchain_out = &chain->base;

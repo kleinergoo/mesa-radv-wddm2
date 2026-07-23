@@ -2718,7 +2718,7 @@ x11_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
    }
 
    result = wsi_swapchain_init(wsi_device, &chain->base, device, pCreateInfo,
-                               image_params, pAllocator);
+                               num_images, image_params, pAllocator);
 
    for (int i = 0; i < ARRAY_SIZE(modifiers); i++)
       vk_free(pAllocator, modifiers[i]);
@@ -2735,7 +2735,6 @@ x11_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
    chain->base.release_images = x11_release_images;
    chain->base.set_present_mode = x11_set_present_mode;
    chain->base.present_mode = present_mode;
-   chain->base.image_count = num_images;
    chain->conn = conn;
    chain->window = window;
    chain->depth = bit_depth;
