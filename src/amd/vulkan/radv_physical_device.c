@@ -642,13 +642,15 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device 
       .KHR_dynamic_rendering = true,
       .KHR_dynamic_rendering_local_read = true,
       .KHR_external_fence = true,
-      .KHR_external_fence_fd = pdev->info.is_amdgpu,
       .KHR_external_memory = true,
-      .KHR_external_memory_fd = pdev->info.is_amdgpu,
       .KHR_external_semaphore = true,
-      .KHR_external_semaphore_fd = pdev->info.is_amdgpu,
 #ifdef _WIN32
+      .KHR_external_memory_win32 = true,
       .KHR_external_semaphore_win32 = true,
+#else
+      .KHR_external_fence_fd = pdev->info.is_amdgpu,
+      .KHR_external_memory_fd = pdev->info.is_amdgpu,
+      .KHR_external_semaphore_fd = pdev->info.is_amdgpu,
 #endif
       .KHR_format_feature_flags2 = true,
       .KHR_fragment_shader_barycentric = pdev->info.gfx_level >= GFX10_3,

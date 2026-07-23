@@ -1547,6 +1547,23 @@ radv_gfx11_set_db_render_control(const struct radv_device *device, unsigned num_
    *db_render_control |= S_028000_MAX_ALLOWED_TILES_IN_WAVE(max_allowed_tiles_in_wave);
 }
 
+#ifdef _WIN32
+VKAPI_ATTR VkResult VKAPI_CALL
+radv_GetMemoryWin32HandleKHR(VkDevice _device,
+                             const VkMemoryGetWin32HandleInfoKHR *pGetHandleInfo,
+                             HANDLE *pHandle)
+{
+   VK_FROM_HANDLE(radv_device, device, _device);
+   VK_FROM_HANDLE(radv_device_memory, memory, pGetHandleInfo->memory);
+
+   assert(pGetHandleInfo->sType == VK_STRUCTURE_TYPE_MEMORY_GET_WIN32_HANDLE_INFO_KHR);
+
+   bool ret = device->ws->buffer_get_handle(device->ws, memory->bo, pHandle);
+   if (ret == false)
+      return vk_error(device, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+   return VK_SUCCESS;
+}
+#else
 VKAPI_ATTR VkResult VKAPI_CALL
 radv_GetMemoryFdKHR(VkDevice _device, const VkMemoryGetFdInfoKHR *pGetFdInfo, int *pFD)
 {
@@ -1573,6 +1590,7 @@ radv_GetMemoryFdKHR(VkDevice _device, const VkMemoryGetFdInfoKHR *pGetFdInfo, in
       return vk_error(device, VK_ERROR_OUT_OF_DEVICE_MEMORY);
    return VK_SUCCESS;
 }
+#endif
 
 static uint32_t
 radv_compute_valid_memory_types_attempt(struct radv_physical_device *pdev, enum radeon_bo_domain domains,
@@ -1620,6 +1638,39 @@ radv_compute_valid_memory_types(struct radv_physical_device *pdev, enum radeon_b
 
    return bits;
 }
+
+#ifdef _WIN32
+VKAPI_ATTR VkResult VKAPI_CALL
+radv_GetMemoryWin32HandlePropertiesKHR(VkDevice _device,
+                                       VkExternalMemoryHandleTypeFlagBits handleType,
+                                       HANDLE handle,
+                                       VkMemoryWin32HandlePropertiesKHR *pProperties)
+{
+   VK_FROM_HANDLE(radv_device, device, _device);
+   struct radv_physical_device *pdev = radv_device_physical(device);
+
+   switch (handleType) {
+   case VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D12_RESOURCE_BIT: {
+      enum radeon_bo_domain domains;
+      enum radeon_bo_flag flags;
+      if (!device->ws->buffer_get_flags_from_handle(device->ws, handle, &domains, &flags))
+         return vk_error(device, VK_ERROR_INVALID_EXTERNAL_HANDLE);
+
+      pProperties->memoryTypeBits = radv_compute_valid_memory_types(pdev, domains, flags);
+      return VK_SUCCESS;
+   }
+   default:
+      /* The valid usage section for this function says:
+       *
+       *    "handleType must not be one of the handle types defined as
+       *    opaque."
+       *
+       * So opaque handle types fall into the default "unsupported" case.
+       */
+      return vk_error(device, VK_ERROR_INVALID_EXTERNAL_HANDLE);
+   }
+}
+#else
 VKAPI_ATTR VkResult VKAPI_CALL
 radv_GetMemoryFdPropertiesKHR(VkDevice _device, VkExternalMemoryHandleTypeFlagBits handleType, int fd,
                               VkMemoryFdPropertiesKHR *pMemoryFdProperties)
@@ -1648,6 +1699,7 @@ radv_GetMemoryFdPropertiesKHR(VkDevice _device, VkExternalMemoryHandleTypeFlagBi
       return vk_error(device, VK_ERROR_INVALID_EXTERNAL_HANDLE);
    }
 }
+#endif
 
 bool
 radv_device_set_pstate(struct radv_device *device, bool enable)
