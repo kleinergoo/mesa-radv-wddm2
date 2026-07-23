@@ -29,6 +29,7 @@ struct vk_device;
 struct vk_sync_type;
 struct vk_sync_wait;
 struct vk_sync_signal;
+struct wsi_device;
 
 enum radeon_bo_domain { /* bitfield */
                         RADEON_DOMAIN_GTT = 2,
@@ -333,6 +334,8 @@ struct radeon_winsys {
 
    int (*reserve_vmid)(struct radeon_winsys *ws);
    void (*unreserve_vmid)(struct radeon_winsys *ws);
+
+   void (*init_wsi)(struct radeon_winsys *ws, struct wsi_device *wsi);
 };
 
 static inline uint64_t

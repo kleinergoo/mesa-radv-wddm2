@@ -89,6 +89,9 @@ radv_init_wsi(struct radv_physical_device *pdev)
 
    wsi_device_setup_syncobj_fd(&pdev->wsi_device, pdev->local_fd);
 
+   if (pdev->ws->init_wsi)
+      pdev->ws->init_wsi(pdev->ws, &pdev->wsi_device);
+
    pdev->vk.wsi_device = &pdev->wsi_device;
 
    return VK_SUCCESS;
