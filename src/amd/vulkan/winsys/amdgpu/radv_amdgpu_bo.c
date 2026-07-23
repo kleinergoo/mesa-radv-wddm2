@@ -870,6 +870,8 @@ radv_amdgpu_winsys_bo_set_metadata(struct radeon_winsys *_ws, struct radeon_wins
    struct amdgpu_bo_metadata metadata = {0};
    uint64_t tiling_flags = 0;
 
+   assert(md->metadata_type == RADEON_METADATA_TYPE_NONE || md->metadata_type == RADEON_METADATA_UMD);
+
    if (ws->info.gfx_level >= GFX12) {
       tiling_flags |= AMDGPU_TILING_SET(GFX12_SWIZZLE_MODE, md->u.gfx12.swizzle_mode);
       tiling_flags |= AMDGPU_TILING_SET(GFX12_DCC_MAX_COMPRESSED_BLOCK, md->u.gfx12.dcc_max_compressed_block);
@@ -908,8 +910,8 @@ radv_amdgpu_winsys_bo_set_metadata(struct radeon_winsys *_ws, struct radeon_wins
    }
 
    metadata.tiling_info = tiling_flags;
-   metadata.size_metadata = md->size_metadata;
-   memcpy(metadata.umd_metadata, md->metadata, sizeof(md->metadata));
+   metadata.size_metadata = md->umd.size_metadata;
+   memcpy(metadata.umd_metadata, md->umd.metadata, sizeof(md->umd.metadata));
 
    ac_drm_bo_set_metadata(ws->dev, bo->base.handle, &metadata);
 }
@@ -956,8 +958,9 @@ radv_amdgpu_winsys_bo_get_metadata(struct radeon_winsys *_ws, struct radeon_wins
       md->u.legacy.scanout = AMDGPU_TILING_GET(tiling_flags, MICRO_TILE_MODE) == 0; /* DISPLAY */
    }
 
-   md->size_metadata = info.metadata.size_metadata;
-   memcpy(md->metadata, info.metadata.umd_metadata, sizeof(md->metadata));
+   md->metadata_type = RADEON_METADATA_UMD;
+   md->umd.size_metadata = info.metadata.size_metadata;
+   memcpy(md->umd.metadata, info.metadata.umd_metadata, sizeof(md->umd.metadata));
 }
 
 static VkResult

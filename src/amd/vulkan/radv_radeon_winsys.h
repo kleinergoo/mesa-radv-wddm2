@@ -113,6 +113,12 @@ enum radeon_bo_layout {
    RADEON_LAYOUT_UNKNOWN
 };
 
+enum radeon_bo_metadata_type {
+   RADEON_METADATA_TYPE_NONE,
+   RADEON_METADATA_TYPE_UMD,
+   RADEON_METADATA_TYPE_KMW,
+};
+
 /* Tiling info for display code, DRI sharing, and other data. */
 struct radeon_bo_metadata {
    /* Tiling flags describing the texture layout for display code
@@ -153,12 +159,43 @@ struct radeon_bo_metadata {
       } gfx12;
    } u;
 
-   /* Additional metadata associated with the buffer, in bytes.
-    * The maximum size is 64 * 4. This is opaque for the winsys & kernel.
-    * Supported by amdgpu only.
-    */
-   uint32_t size_metadata;
-   uint32_t metadata[64];
+   enum radeon_bo_metadata_type metadata_type;
+   union {
+      /* Additional metadata associated with the buffer, in bytes.
+       * The maximum size is 64 * 4. This is opaque for the winsys & kernel.
+       * Supported by amdgpu only.
+       */
+      struct {
+         uint32_t size_metadata;
+         uint32_t metadata[64];
+      } umd;
+
+      /* Non-opaque surface metadata (WDDM2/KMW path).
+       */
+      struct {
+         uint16_t tile_swizzle;
+         uint32_t pitch_bytes;
+         uint64_t surf_size;
+
+         uint64_t dcc_offset;
+         uint64_t display_dcc_offset;
+         bool dcc_pipe_aligned;
+         bool dcc_rb_aligned;
+
+         uint64_t cmask_offset;
+         uint64_t fmask_offset;
+         uint64_t fmask_xor;
+         uint8_t fmask_swizzle_mode;
+
+         uint64_t htile_offset;
+
+         /* GFX12 HiSZ */
+         uint64_t hi_z_offset;
+         uint64_t hi_s_offset;
+         uint8_t hi_z_swizzle_mode;
+         uint8_t hi_s_swizzle_mode;
+      } kmw;
+   };
 };
 
 struct radeon_winsys_ctx;

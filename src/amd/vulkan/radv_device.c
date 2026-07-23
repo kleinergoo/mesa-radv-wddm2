@@ -1581,8 +1581,10 @@ radv_GetMemoryFdKHR(VkDevice _device, const VkMemoryGetFdInfoKHR *pGetFdInfo, in
     */
    if (memory->image) {
       struct radv_image *image = memory->image;
+      struct radeon_bo_metadata md;
 
-      radv_image_bo_set_metadata(device, image, memory->bo);
+      radv_image_get_metadata(device, image, RADEON_METADATA_TYPE_UMD, &md);
+      device->ws->buffer_set_metadata(device->ws, memory->bo, &md);
    }
 
    bool ret = device->ws->buffer_get_fd(device->ws, memory->bo, pFD);

@@ -239,6 +239,8 @@ struct gfx9_surf_layout {
    uint32_t surf_height;      /* up to 64K */
 
    uint64_t surf_offset; /* 0 unless imported with an offset */
+   /* The number of slices */
+   uint32_t num_slices;  /* up to 16K */
    /* The size of the 2D plane containing all mipmap levels. */
    uint64_t surf_slice_size;
    /* Mipmap level offset within the slice in bytes. Only valid for LINEAR. */
@@ -263,6 +265,11 @@ struct gfx9_surf_layout {
    uint8_t dcc_number_type; /* CB_COLOR0_INFO.NUMBER_TYPE */
    uint8_t dcc_data_format; /* [0:4]:CB_COLOR0_INFO.FORMAT, [5]:MM */
    bool dcc_write_compress_disable;
+
+   /* Cached addrlib params used to compute the surface. */
+   uint32_t format;
+   uint32_t num_samples;
+   uint32_t flags;
 
    union {
       /* Color */
@@ -317,6 +324,7 @@ struct gfx9_surf_layout {
 
 struct radeon_surf {
    /* Format properties. */
+   uint32_t format;
    uint8_t blk_w : 4;
    uint8_t blk_h : 4;
    uint8_t bpe : 5;

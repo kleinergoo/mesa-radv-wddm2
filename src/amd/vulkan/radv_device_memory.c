@@ -292,25 +292,24 @@ radv_alloc_memory(struct radv_device *device, const VkMemoryAllocateInfo *pAlloc
       }
 
       if (flags & RADEON_FLAG_GFX12_ALLOW_DCC) {
+         struct radeon_bo_metadata md = {0};
+
          if (mem->image) {
             /* Set BO metadata (including DCC tiling flags) for dedicated
-             * allocations because compressed writes are enabled and the kernel
-             * requires a DCC view for recompression.
-             */
-            radv_image_bo_set_metadata(device, mem->image, mem->bo);
+            * allocations because compressed writes are enabled and the kernel
+            * requires a DCC view for recompression.
+            */
+            radv_image_get_metadata(device, mem->image, RADEON_METADATA_TYPE_UMD, &md);
          } else {
             /* Otherwise, disable compressed writes to prevent recompression
-             * when the BO is moved back to VRAM because it's not yet possible
-             * to set DCC tiling flags per range for suballocations. The only
-             * problem is that we will loose DCC after migration but that
-             * should happen rarely.
-             */
-            struct radeon_bo_metadata md = {0};
-
+            * when the BO is moved back to VRAM because it's not yet possible
+            * to set DCC tiling flags per range for suballocations. The only
+            * problem is that we will loose DCC after migration but that
+            * should happen rarely.
+            */
             md.u.gfx12.dcc_write_compress_disable = true;
-
-            device->ws->buffer_set_metadata(device->ws, mem->bo, &md);
          }
+         device->ws->buffer_set_metadata(device->ws, mem->bo, &md);
       }
 
       mem->heap_index = heap_index;
