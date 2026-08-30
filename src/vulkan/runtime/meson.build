@@ -90,8 +90,9 @@ if with_vulkan_dx
   )
   vulkan_lite_runtime_files += vk_wddm2_dispatch_table
 
+  vulkan_lite_runtime_deps += dep_dxheaders
+
   if host_machine.system() != 'windows'
-    vulkan_lite_runtime_deps += dep_dxheaders
     vulkan_lite_runtime_inc += '../../../include/winddk'
   endif
 endif

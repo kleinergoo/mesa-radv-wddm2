@@ -71,13 +71,13 @@ enum wsi_win32_image_state {
 struct wsi_win32_image {
    struct wsi_image base;
    enum wsi_win32_image_state state;
-   struct wsi_win32_swapchain *chain;
-   struct {
-      ID3D12Resource *swapchain_res;
-      ID3D12Resource *blit_res;
-      ID3D12CommandAllocator *cmd_alloc;
-      ID3D12GraphicsCommandList *cmd_list;
-   } dxgi;
+    struct wsi_win32_swapchain *chain;
+    struct {
+       ID3D12Resource *swapchain_res;
+       ID3D12Resource *blit_res;
+       ID3D12CommandAllocator *cmd_alloc;
+       ID3D12GraphicsCommandList *cmd_list;
+    } dxgi;
    struct {
       HDC dc;
       HBITMAP bmp;
@@ -114,6 +114,8 @@ struct wsi_win32_swapchain {
    HWND wnd;
    HDC chain_dc;
    ID3D12Fence              **d3d12_blit_fences;
+   ID3D12CommandQueue        *d3d12_cmd_queue;
+   uint32_t                   blit_row_pitch;
    struct wsi_win32_image     images[0];
 };
 
@@ -455,30 +457,67 @@ wsi_dxgi_create_d3d12_resource(struct wsi_win32_swapchain *chain,
    ID3D12Device *d3d12_device;
    HRESULT hr;
 
-   D3D12_HEAP_PROPERTIES heap_props = { 0 };
+   D3D12_HEAP_PROPERTIES heap_props = {};
    heap_props.Type = D3D12_HEAP_TYPE_DEFAULT;
    heap_props.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
    heap_props.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
    heap_props.CreationNodeMask = 1;
    heap_props.VisibleNodeMask = 1;
 
-   D3D12_RESOURCE_DESC desc = { 0 };
-   desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+   /* Use a D3D12 BUFFER for the RADV blit target so RADV writes plain
+    * row-major bytes that D3D12 can upload to the tiled swapchain buffer
+    * via CopyTextureRegion with a placed footprint. The (aligned) row
+    * stride must match the linear layout RADV computes for the image. */
+   unsigned bpp = 4;
+   switch (chain->base.image_info.create.format) {
+   case VK_FORMAT_R8G8_UNORM:
+   case VK_FORMAT_R16_UNORM:
+      bpp = 2;
+      break;
+   case VK_FORMAT_R8_UNORM:
+      bpp = 1;
+      break;
+   default:
+      bpp = 4;
+      break;
+   }
+
+   chain->blit_row_pitch = align(chain->extent.width * bpp, 256);
+
+   /* Query RADV's actual linear layout so the D3D12 buffer size and the
+    * placed footprint row pitch match exactly how RADV writes the pixels. */
+   VkSubresourceLayout sub_layout;
+   const struct wsi_device *v_wsi = chain->base.wsi;
+   VkImageSubresource sub_res = {
+      VK_IMAGE_ASPECT_COLOR_BIT,
+      0, /* mipLevel */
+      0, /* arrayLayer */
+   };
+   v_wsi->GetImageSubresourceLayout(chain->base.device, win32_image->base.image,
+                                    &sub_res, &sub_layout);
+   if (sub_layout.rowPitch)
+      chain->blit_row_pitch = sub_layout.rowPitch;
+
+   D3D12_RESOURCE_DESC desc = {};
+   desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
    desc.Alignment = 0;
-   desc.Width = chain->extent.width;
-   desc.Height = chain->extent.height;
+   desc.Width = sub_layout.size ? sub_layout.size :
+                (uint64_t)chain->blit_row_pitch * chain->extent.height;
+   desc.Height = 1;
    desc.DepthOrArraySize = 1;
    desc.MipLevels = 1;
-   desc.Format = convert_to_dxgi_format(chain->base.image_info.create.format);
+   desc.Format = DXGI_FORMAT_UNKNOWN;
    desc.SampleDesc = {1, 0};
-   desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
-   desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+   desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+   desc.Flags = D3D12_RESOURCE_FLAG_NONE;
 
    d3d12_device = (ID3D12Device *)wsi_device->win32.get_d3d12_device(chain->base.device);
+   /* The blit source is shared with Vulkan and written by RADV, so it must
+    * live in COMMON state (required for cross-API shared resources). */
    hr = d3d12_device->CreateCommittedResource(&heap_props,
                                               D3D12_HEAP_FLAG_SHARED,
                                               &desc,
-                                              D3D12_RESOURCE_STATE_RENDER_TARGET,
+                                              D3D12_RESOURCE_STATE_COMMON,
                                               NULL,
                                               IID_PPV_ARGS(&win32_image->dxgi.blit_res));
 
@@ -526,7 +565,7 @@ wsi_dxgi_create_blit_context(struct wsi_win32_swapchain *chain,
    }
 
    ID3D12GraphicsCommandList *cmd_list = win32_image->dxgi.cmd_list;
-   D3D12_RESOURCE_BARRIER barrier = { 0 };
+   D3D12_RESOURCE_BARRIER barrier = {};
    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
 
@@ -536,20 +575,38 @@ wsi_dxgi_create_blit_context(struct wsi_win32_swapchain *chain,
    cmd_list->ResourceBarrier(1, &barrier);
 
    barrier.Transition.pResource = src;
-   barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+   barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
    cmd_list->ResourceBarrier(1, &barrier);
 
-   cmd_list->CopyResource(dst, src);
+   D3D12_TEXTURE_COPY_LOCATION dst_loc = {};
+   dst_loc.pResource = dst;
+   dst_loc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+   dst_loc.SubresourceIndex = 0;
+
+   D3D12_TEXTURE_COPY_LOCATION src_loc = {};
+   src_loc.pResource = src;
+   src_loc.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+   src_loc.PlacedFootprint.Offset = 0;
+   src_loc.PlacedFootprint.Footprint.Format =
+      convert_to_dxgi_format(chain->base.image_info.create.format);
+   src_loc.PlacedFootprint.Footprint.Width = chain->extent.width;
+   src_loc.PlacedFootprint.Footprint.Height = chain->extent.height;
+   src_loc.PlacedFootprint.Footprint.Depth = 1;
+   src_loc.PlacedFootprint.Footprint.RowPitch = chain->blit_row_pitch;
+
+   cmd_list->CopyTextureRegion(&dst_loc, 0, 0, 0, &src_loc, nullptr);
 
    barrier.Transition.pResource = dst;
    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
    cmd_list->ResourceBarrier(1, &barrier);
 
+   /* Return the shared Vulkan-written buffer to COMMON before handing the
+    * resource back to the RADV rendering path. */
    barrier.Transition.pResource = src;
    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
-   barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+   barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COMMON;
    cmd_list->ResourceBarrier(1, &barrier);
 
    cmd_list->Close();
@@ -587,8 +644,9 @@ wsi_dxgi_blit(struct wsi_swapchain *drv_chain, uint32_t image_index)
    struct wsi_win32_image *win32_image = &chain->images[image_index];
    struct wsi_device *wsi_device = chain->wsi->wsi;
 
-   ID3D12CommandQueue *queue = (ID3D12CommandQueue *)
-      wsi_device->win32.get_d3d12_command_queue(chain->base.device);
+   ID3D12CommandQueue *queue = chain->d3d12_cmd_queue;
+   if (!queue)
+      queue = (ID3D12CommandQueue *)wsi_device->win32.get_d3d12_command_queue(chain->base.device);
    if (!queue)
       return VK_ERROR_OUT_OF_DEVICE_MEMORY;
 
@@ -716,6 +774,11 @@ wsi_dxgi_configure_image(const struct wsi_swapchain *chain,
    info->create_mem = wsi_create_dxgi_image_mem;
 
    if (chain->blit.type != WSI_SWAPCHAIN_NO_BLIT) {
+      /* The DXGI blit path hands RADV's rendered image to D3D12 as a plain
+       * row-major buffer (placed footprint), so the RADV image must be
+       * allocated linear so the pixel layout is well-defined and matches the
+       * stride we report to D3D12. */
+      info->create.tiling = VK_IMAGE_TILING_LINEAR;
       wsi_configure_image_blit_image(chain, info);
       info->select_image_memory_type = wsi_select_device_memory_type;
       info->select_blit_dst_memory_type = wsi_select_device_memory_type;
@@ -1041,6 +1104,7 @@ wsi_win32_surface_create_swapchain_dxgi(
    IDXGIFactory4 *factory = wsi->dxgi.factory;
    ID3D12CommandQueue *queue =
       (ID3D12CommandQueue *)wsi->wsi->win32.get_d3d12_command_queue(device);
+   chain->d3d12_cmd_queue = queue;
 
    DXGI_ALPHA_MODE alpha_mode;
    switch (create_info->compositeAlpha) {
@@ -1195,7 +1259,8 @@ wsi_win32_surface_create_swapchain(
       { WSI_IMAGE_TYPE_CPU },
    };
 
-   bool supports_dxgi = wsi->dxgi.factory &&
+   bool supports_dxgi = !wsi_device->sw &&
+                        wsi->dxgi.factory &&
                         wsi->dxgi.dcomp &&
                         wsi->wsi->win32.get_d3d12_command_queue;
    struct wsi_base_image_params *image_params = supports_dxgi ?
@@ -1323,6 +1388,9 @@ wsi_win32_init_wsi(struct wsi_device *wsi_device,
    wsi->physical_device = physical_device;
    wsi->alloc = alloc;
    wsi->wsi = wsi_device;
+
+   if (WSI_DEBUG & WSI_DEBUG_SW)
+      wsi_device->sw = true;
 
    if (!wsi_device->sw) {
       wsi->dxgi.factory = dxgi_get_factory(WSI_DEBUG & WSI_DEBUG_DXGI);
