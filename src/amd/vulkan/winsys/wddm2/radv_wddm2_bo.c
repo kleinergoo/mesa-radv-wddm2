@@ -663,16 +663,24 @@ radv_wddm2_bo_from_handle(struct radeon_winsys *_ws, void *handle, unsigned prio
       goto error_alloc;
    }
 
-   /* Allocate buffer for private driver data */
-   void *pdata = calloc(1, query_info.TotalPrivateDriverDataSize + query_info.PrivateRuntimeDataSize +
-                           query_info.NumAllocations * sizeof(D3DDDI_OPENALLOCATIONINFO2));
+   /* Allocate buffer for private driver data.
+    * Lay out the four WDDM buffers back-to-back so they do not overlap:
+    *   [total private driver data] [resource private driver data]
+    *   [private runtime data]      [open allocation info array]
+    */
+   size_t pd_size = query_info.TotalPrivateDriverDataSize;
+   size_t res_size = query_info.ResourcePrivateDriverDataSize;
+   size_t rt_size = query_info.PrivateRuntimeDataSize;
+   size_t ai_size = query_info.NumAllocations * sizeof(D3DDDI_OPENALLOCATIONINFO2);
+   void *pdata = calloc(1, pd_size + res_size + rt_size + ai_size);
    if (!pdata) {
       result = VK_ERROR_OUT_OF_HOST_MEMORY;
       goto error_alloc;
    }
-   void *res_pdata = (uint8_t *)pdata + query_info.TotalPrivateDriverDataSize;
-   void *runtime_data = (uint8_t *)res_pdata + query_info.ResourcePrivateDriverDataSize;
-   D3DDDI_OPENALLOCATIONINFO2 *alloc_info = (D3DDDI_OPENALLOCATIONINFO2 *)((uint8_t *)res_pdata + query_info.PrivateRuntimeDataSize);
+   void *res_pdata = (uint8_t *)pdata + pd_size;
+   void *runtime_data = (uint8_t *)res_pdata + res_size;
+   D3DDDI_OPENALLOCATIONINFO2 *alloc_info =
+      (D3DDDI_OPENALLOCATIONINFO2 *)((uint8_t *)runtime_data + rt_size);
 
    D3DKMT_OPENRESOURCEFROMNTHANDLE open_resource = {
       .hDevice = ws->device_h,
@@ -693,15 +701,14 @@ radv_wddm2_bo_from_handle(struct radeon_winsys *_ws, void *handle, unsigned prio
    }
 
    struct alloc_entry *entry = (struct alloc_entry *)((uint8_t *) pdata + sizeof(struct alloc_header));
-   struct alloc_surf *surf = (struct alloc_surf *)((uint8_t *)entry + sizeof(struct alloc_entry));
 
    bo->base.obj_id = bo->base.handle = alloc_info[0].hAllocation;
    bo->base.size = entry->bo_info.phys_size;
 
-   bo->md.u.gfx9.swizzle_mode = surf->swizzle_mode;
+   bo->md.u.gfx9.swizzle_mode = 0;
    bo->md.metadata_type = RADEON_METADATA_TYPE_KMW;
-   bo->md.kmw.pitch_bytes = surf->width;
-   bo->md.kmw.surf_size = surf->slice_size;
+   bo->md.kmw.pitch_bytes = 0;
+   bo->md.kmw.surf_size = 0;
 
    /* Map the opened allocation into GPU virtual address space */
    D3DDDI_MAPGPUVIRTUALADDRESS map = {
@@ -709,6 +716,7 @@ radv_wddm2_bo_from_handle(struct radeon_winsys *_ws, void *handle, unsigned prio
       .MinimumAddress = RADV_WDDM2_HEAP_START,
       .MaximumAddress = RADV_WDDM2_REPLAY_HEAP_START,
       .hAllocation = bo->base.handle,
+      .SizeInPages = bo->base.size / 4096,
       .Protection = {
          .Write = 1,
       },

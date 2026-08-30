@@ -59,15 +59,9 @@
 
 struct PACKED create_context_private_data {
    uint32_t header_size;
-   uint32_t flags;
-   uint32_t reserved[11];
-   uint32_t version;
-   uint32_t dw13;
-   uint32_t dw14;
-   uint32_t section_size;
-   uint32_t reserved2[89];
+   uint32_t reserved[15];
 };
-static_assert(sizeof(struct create_context_private_data) == 0x40 + 0x168, "This struct has no holes");
+static_assert(sizeof(struct create_context_private_data) == 0x40, "This struct has no holes");
 
 struct PACKED create_queue_private_data {
    uint32_t header_size;
@@ -229,23 +223,14 @@ radv_wddm2_queue_init(struct radv_wddm2_winsys *ws, enum amd_ip_type hw_ip,
 
    struct create_context_private_data create_context_data = {
       .header_size = 0x40,
-      .flags = 0x100000,
-      .dw13 = 0x200000,
-      .section_size = 0x168,
    };
-
-   if (hw_ip == AMD_IP_GFX) {
-      create_context_data.flags |= 0x40000;
-      create_context_data.version = 9;
-   }
 
    D3DKMT_CREATECONTEXTVIRTUAL create_context = {
       .hDevice = ws->device_h,
       .NodeOrdinal = node,
       .EngineAffinity = 1, // TODO
       .Flags = {
-         .HwQueueSupported = true,
-         //.DisableGpuTimeout = true, // D3D sets this to true?
+         .DisableGpuTimeout = true,
       },
       .pPrivateDriverData = &create_context_data,
       .PrivateDriverDataSize = sizeof(create_context_data),
@@ -260,29 +245,6 @@ radv_wddm2_queue_init(struct radv_wddm2_winsys *ws, enum amd_ip_type hw_ip,
    queue->context_h = create_context.hContext;
 
    if (hw_ip == AMD_IP_GFX || hw_ip == AMD_IP_COMPUTE) {
-      struct create_queue_private_data create_queue_pdd = {
-         .header_size = sizeof(struct create_queue_private_data),
-         .flags = 0x21000,
-      };
-
-      if (parent) {
-         create_queue_pdd.flags |= 0x80000;
-         create_queue_pdd.parent_queue_id = parent->queue_id;
-      }
-
-      D3DKMT_CREATEHWQUEUE create_queue = {
-         .hHwContext = queue->context_h,
-         .pPrivateDriverData = &create_queue_pdd,
-         .PrivateDriverDataSize = sizeof(create_queue_pdd),
-      };
-      status = WDDM2_DISPATCH(CreateHwQueue(&create_queue));
-      if (!NT_SUCCESS(status)) {
-         fprintf(stderr, "Create queue failed 0x%X for IP %i and device 0x%x\n", status, hw_ip, ws->device_h);
-         goto failed;
-      }
-      queue->handle = create_queue.hHwQueue;
-      queue->queue_id = create_queue_pdd.queue_id;
-
       D3DKMT_CREATESYNCHRONIZATIONOBJECT2 create_sync = {
          .hDevice = ws->device_h,
          .Info = {
@@ -692,10 +654,10 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
 
    assert(queue->context_h != 0 && "Unsupported IP type");
 
-   if (submit->is_gang && ace_queue->handle == 0) {
+   if (submit->is_gang && ace_queue->context_h == 0) {
       assert(submit->ip_type == AMD_IP_GFX);
       radv_wddm2_queue_init(ctx->ws, AMD_IP_COMPUTE, 0, queue, ace_queue);
-      if (ace_queue->handle == 0)
+      if (ace_queue->context_h == 0)
          return VK_ERROR_DEVICE_LOST;
    }
 
