@@ -66,7 +66,7 @@ uint32_t
 msb_idx_u32(uint32_t n)
 {
   assert(n > 0);
-#if defined(_MSC_VER) && !defined(__clang__)
+#if defined(_MSC_VER)
 
   uint32_t index;
 

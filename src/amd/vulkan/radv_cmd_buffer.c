@@ -6733,7 +6733,7 @@ radv_flush_dynamic_descriptors(struct radv_cmd_buffer *cmd_buffer, VkShaderStage
       radv_flush_dynamic_descriptors_offsets(cmd_buffer, stages, bind_point);
 }
 
-ALWAYS_INLINE void
+void
 radv_get_vbo_info(const struct radv_cmd_buffer *cmd_buffer, uint32_t idx, struct radv_vbo_info *vbo_info)
 {
    const struct radv_dynamic_state *d = &cmd_buffer->state.dynamic;

@@ -30,6 +30,7 @@ struct vk_sync_type;
 struct vk_sync_wait;
 struct vk_sync_signal;
 struct wsi_device;
+struct radv_image;
 
 enum radeon_bo_domain { /* bitfield */
                         RADEON_DOMAIN_GTT = 2,

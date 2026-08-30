@@ -49,6 +49,7 @@ extern const struct vk_device_entrypoint_table wsi_device_entrypoints;
 struct wsi_interface;
 struct vk_instance;
 struct vk_queue;
+struct wsi_swapchain;
 
 struct driOptionCache;
 
