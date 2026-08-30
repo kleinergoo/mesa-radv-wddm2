@@ -25,6 +25,7 @@
 #include "radv_wddm2_winsys.h"
 
 #define COBJMACROS
+#include <stdio.h>
 #include <unknwn.h>
 #include <directx/d3d12.h>
 
@@ -41,6 +42,10 @@ radv_wddm2_wsi_get_d3d12_device(VkDevice _device)
    if (!ws->wsi.d3d12_device) {
       ws->wsi.d3d12_device =
          vk_dxgi_create_d3d12_device(ws->adapter_luid);
+      fprintf(stderr, "[wddm2-d3d12] vk_dxgi_create_d3d12_device -> %s (LUID %x:%x)\n",
+              ws->wsi.d3d12_device ? "OK" : "NULL",
+              (unsigned)ws->adapter_luid.HighPart,
+              (unsigned)ws->adapter_luid.LowPart);
    }
 
    return ws->wsi.d3d12_device;
@@ -54,8 +59,10 @@ radv_wddm2_wsi_get_d3d12_command_queue(VkDevice _device)
 
    if (!ws->wsi.d3d12_queue) {
       ID3D12Device *d3d12_device = (ID3D12Device *)radv_wddm2_wsi_get_d3d12_device(_device);      D3D12_COMMAND_QUEUE_DESC desc = {};
-      ID3D12Device_CreateCommandQueue(d3d12_device, &desc,
-                                      &IID_ID3D12CommandQueue, (void **)&ws->wsi.d3d12_queue);
+      HRESULT hr = ID3D12Device_CreateCommandQueue(d3d12_device, &desc,
+                                                   &IID_ID3D12CommandQueue, (void **)&ws->wsi.d3d12_queue);
+      fprintf(stderr, "[wddm2-d3d12] CreateCommandQueue -> hr=0x%08lx queue=%p device=%p\n",
+              (unsigned long)hr, ws->wsi.d3d12_queue, d3d12_device);
    }
 
    return ws->wsi.d3d12_queue;
