@@ -709,8 +709,6 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
       }
       submit_pdd_writer_finalize(&pdd);
 
-      print_hex_data(stderr, pdd.buffer, pdd.offset);
-
       if (queue->handle) {
          static uint32_t submit_count = 0;
          submit_count++;
