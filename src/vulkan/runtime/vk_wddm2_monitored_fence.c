@@ -74,6 +74,9 @@ to_wddm2_monitored_fence(struct vk_sync *sync)
    return container_of(sync, struct vk_wddm2_monitored_fence, base);
 }
 
+static void vk_wddm2_monitored_fence_finish(struct vk_device *device,
+                                            struct vk_sync *sync);
+
 static VkResult
 NTSTATUS_to_VkResult(struct vk_device *device,
                      NTSTATUS status)
@@ -99,13 +102,35 @@ vk_wddm2_monitored_fence_init(struct vk_device *device,
    struct vk_wddm2_monitored_fence *fence = to_wddm2_monitored_fence(sync);
    NTSTATUS status;
 
+   /*
+    * NOTE: we must check VK_SYNC_IS_SHAREABLE here, not VK_SYNC_IS_SHARED.
+    *
+    * IS_SHAREABLE means "this sync was created with an export handle type
+    * and must be constructed so it *can* be shared later" -- this is the
+    * only flag vk_semaphore.c ever sets before init() runs.
+    *
+    * IS_SHARED means "this sync's payload has already been exported or
+    * imported" -- per vk_sync.c, it is only ever set *after* a successful
+    * export_win32_handle()/import_win32_handle() call, i.e. strictly after
+    * this init() function has already returned. It can never be set at
+    * creation time, so gating the D3DKMT Shared flag on it here meant
+    * every WDDM2 fence was created non-shareable, and the ShareObjects()
+    * call below would silently fail on any fence WSI needed to export
+    * (see wsi_common_win32.cpp's GetSemaphoreWin32HandleKHR path, which
+    * feeds ID3D12Device::OpenSharedHandle for blit-path presentation).
+    *
+    * Compare src/microsoft/vulkan/dzn_sync.c, which correctly gates its
+    * D3D12_FENCE_FLAG_SHARED on VK_SYNC_IS_SHAREABLE for the same reason.
+    */
+   const bool shareable = (sync->flags & VK_SYNC_IS_SHAREABLE) != 0;
+
    D3DKMT_CREATESYNCHRONIZATIONOBJECT2 create = {
       .hDevice = device->wddm2_handle,
       .Info = {
          .Type = D3DDDI_MONITORED_FENCE,
          .Flags = {
-            .Shared = (sync->flags & VK_SYNC_IS_SHARED) != 0,
-            .NtSecuritySharing = (sync->flags & VK_SYNC_IS_SHARED) != 0,
+            .Shared = shareable,
+            .NtSecuritySharing = shareable,
             /* This gets us 64-bit fences */
             .NoGPUAccess = false,
          },
@@ -122,15 +147,29 @@ vk_wddm2_monitored_fence_init(struct vk_device *device,
    fence->handle = create.hSyncObject;
    fence->value_map = create.Info.MonitoredFence.FenceValueCPUVirtualAddress;
 #ifdef _WIN32
-   {
+   /*
+    * Only attempt to obtain a shareable NT handle for fences that were
+    * actually created shareable above -- and check the result. Previously
+    * this call ran unconditionally with its NTSTATUS discarded, so a
+    * failure here (e.g. because Shared was false, see above) left
+    * fence->shared_handle as zero-initialized NULL with no diagnostic,
+    * which later surfaced far away as a generic "DuplicateHandle failed"
+    * VK_ERROR_UNKNOWN from export_opaque_win32_handle().
+    */
+   if (shareable) {
       OBJECT_ATTRIBUTES oa = { sizeof(OBJECT_ATTRIBUTES) };
-      WDDM2_DISPATCH(ShareObjects(
+      NTSTATUS share_status = WDDM2_DISPATCH(ShareObjects(
          1,
          &fence->handle,
          &oa,
          D3DDDI_SYNC_OBJECT_ALL_ACCESS,
          &fence->shared_handle
       ));
+      if (unlikely(!NT_SUCCESS(share_status))) {
+         VkResult result = NTSTATUS_to_VkResult(device, share_status);
+         vk_wddm2_monitored_fence_finish(device, sync);
+         return result;
+      }
    }
 #endif
 
