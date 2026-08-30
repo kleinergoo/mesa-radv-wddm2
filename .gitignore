@@ -7,3 +7,12 @@
 /build
 .venv/
 *.mda.tar
+
+# Local build helpers / artifacts
+/build
+/build-zig
+/ninja
+/run_build.bat
+/run_dumpbin.bat
+/build_buildlog.txt
+/build_devenv.txt
