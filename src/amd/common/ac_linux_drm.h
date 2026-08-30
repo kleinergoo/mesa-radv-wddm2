@@ -63,6 +63,24 @@
 #define AMDGPU_VRAM_TYPE_HBM3E 13
 #define AMDGPU_VRAM_TYPE_HBM4 14
 
+#define AMDGPU_FAMILY_UNKNOWN   0
+#define AMDGPU_FAMILY_SI        110
+#define AMDGPU_FAMILY_CI        120
+#define AMDGPU_FAMILY_KV        125
+#define AMDGPU_FAMILY_VI        130
+#define AMDGPU_FAMILY_CZ        135
+#define AMDGPU_FAMILY_AI        141
+#define AMDGPU_FAMILY_RV        142
+#define AMDGPU_FAMILY_NV        143
+#define AMDGPU_FAMILY_VGH       144
+#define AMDGPU_FAMILY_GC_11_0_0 145
+#define AMDGPU_FAMILY_YC        146
+#define AMDGPU_FAMILY_GC_10_3_6 149
+#define AMDGPU_FAMILY_GC_11_0_1 148
+#define AMDGPU_FAMILY_GC_10_3_7 151
+#define AMDGPU_FAMILY_GC_11_5_0 150
+#define AMDGPU_FAMILY_GC_12_0_0 152
+
 #define AMDGPU_INFO_VIDEO_CAPS_CODEC_IDX_MPEG2 0
 #define AMDGPU_INFO_VIDEO_CAPS_CODEC_IDX_MPEG4 1
 #define AMDGPU_INFO_VIDEO_CAPS_CODEC_IDX_VC1 2
@@ -75,6 +93,9 @@
 
 struct drm_amdgpu_heap_info {
    uint64_t total_heap_size;
+   uint64_t usable_heap_size;
+   uint64_t heap_usage;
+   uint64_t max_allocation;
 };
 struct drm_amdgpu_memory_info {
    struct drm_amdgpu_heap_info vram;
@@ -192,10 +213,16 @@ struct drm_amdgpu_info_device {
 struct drm_amdgpu_info_hw_ip {
    uint32_t hw_ip_version_major;
    uint32_t hw_ip_version_minor;
+   uint64_t capabilities_flags;
    uint32_t ib_start_alignment;
    uint32_t ib_size_alignment;
    uint32_t available_rings;
    uint32_t ip_discovery_version;
+};
+
+struct drm_amdgpu_info_firmware {
+   uint32_t ver;
+   uint32_t feature;
 };
 
 struct drm_amdgpu_info_uq_metadata_gfx {

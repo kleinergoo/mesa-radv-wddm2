@@ -131,6 +131,8 @@ amd_common_files = files(
   'ac_msgpack.c',
   'ac_msgpack.h',
   'amd_family.c',
+  'amdgpu_devices.c',
+  'amdgpu_devices.h',
   'ac_parse_ib.c',
   'ac_perfcounter.c',
   'ac_perfcounter_gfx10.c',

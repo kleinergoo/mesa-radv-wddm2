@@ -6,7 +6,12 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "common/amd_family.h"
+
+#if !defined(_WIN32)
 #include "drm-uapi/amdgpu_drm.h"
+#else
+#include "common/ac_linux_drm.h"
+#endif
 
 struct amdgpu_device {
    const char *name;

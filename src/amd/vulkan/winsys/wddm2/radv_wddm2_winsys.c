@@ -50,6 +50,7 @@
 #include "vk_wddm2_monitored_fence.h"
 #include "common/ac_linux_drm.h"
 #include "common/amd_family.h"
+#include "common/amdgpu_devices.h"
 
 #include <locale.h>
 
@@ -105,8 +106,32 @@ static uint32_t
 kmd_to_amdgpu_vram_type(uint32_t kmd_type)
 {
    switch (kmd_type) {
+   case 1:
+      return AMDGPU_VRAM_TYPE_GDDR3;
+   case 2:
+      return AMDGPU_VRAM_TYPE_GDDR5;
+   case 3:
+      return AMDGPU_VRAM_TYPE_GDDR4;
+   case 4:
+      return AMDGPU_VRAM_TYPE_DDR3;
+   case 5:
+      return AMDGPU_VRAM_TYPE_HBM;
    case 6:
       return AMDGPU_VRAM_TYPE_GDDR6;
+   case 7:
+      return AMDGPU_VRAM_TYPE_DDR2;
+   case 8:
+      return AMDGPU_VRAM_TYPE_DDR4;
+   case 9:
+      return AMDGPU_VRAM_TYPE_DDR5;
+   case 10:
+      return AMDGPU_VRAM_TYPE_LPDDR4;
+   case 11:
+      return AMDGPU_VRAM_TYPE_LPDDR5;
+   case 12:
+      return AMDGPU_VRAM_TYPE_HBM3E;
+   case 13:
+      return AMDGPU_VRAM_TYPE_HBM4;
    default:
       fprintf(stderr, "Unknown KMD VRAM type: %u\n", kmd_type);
       return AMDGPU_VRAM_TYPE_UNKNOWN;
@@ -130,12 +155,12 @@ radv_wddm2_fill_gpu_info(struct radv_wddm2_winsys *ws,
       .gart_page_size = 4096,
       .tcp_cache_size = 32,
    };
+   D3DKMT_QUERY_DEVICE_IDS query_ids = {
+      .PhysicalAdapterIndex = adapter_info->physical_adapter_index,
+   };
 
    /* PCI device ids */
    {
-      D3DKMT_QUERY_DEVICE_IDS query_ids = {
-         .PhysicalAdapterIndex = adapter_info->physical_adapter_index,
-      };
       status = query_adapter_info(ws, KMTQAITYPE_PHYSICALADAPTERDEVICEIDS, &query_ids, sizeof(query_ids));
       if (!NT_SUCCESS(status))
          return status;
@@ -164,12 +189,14 @@ radv_wddm2_fill_gpu_info(struct radv_wddm2_winsys *ws,
    info->valid_luid = true;
    memcpy(info->luid, &ws->adapter_luid, sizeof(info->luid));
 
-   /* GTT size */
+   /* GTT and VRAM size */
    {
       D3DKMT_SEGMENTSIZEINFO segment = {};
       if (NT_SUCCESS(query_adapter_info(ws, KMTQAITYPE_GETSEGMENTSIZE,
                                         &segment, sizeof(segment)))) {
          mem.gtt.total_heap_size = segment.SharedSystemMemorySize;
+         mem.vram.total_heap_size = segment.DedicatedVideoMemorySize;
+         mem.cpu_accessible_vram.total_heap_size = segment.DedicatedVideoMemorySize;
       }
    }
 
@@ -200,184 +227,242 @@ radv_wddm2_fill_gpu_info(struct radv_wddm2_winsys *ws,
       }
    }
 
-   struct PACKED umdprivatedata_header {
-      uint32_t flags[3];
-      uint32_t vendor_id;
-      uint32_t unknown0;
-      uint32_t pci_id;
-      uint32_t unknown1[9];
-      uint16_t registry_path[100];
-      uint32_t padding[490];
-      uint32_t type;
-      uint32_t something;
-      uint32_t unknown2[42];
-      uint32_t size;
-   };
-
-   struct PACKED basic_properties {
-      struct umdprivatedata_header header;
-      uint32_t unk0[11];
-      uint32_t device_id;
-      uint32_t family_id;
-      uint32_t chip_external_rev;
-      uint32_t subsystem_id;
-      uint32_t unk1[6];
-      uint32_t vram_type;
-      uint32_t vram_bit_width;
-      uint32_t unk2[43];
-      char umd_registry_path[256];
-      uint32_t unk3[18];
-      uint32_t num_rb_pipes;
-      uint32_t num_enabled_rb_pipes;
-      uint32_t enabled_rb_pipes_mask;
-      uint32_t enabled_rb_pipes_mask_hi;
-      uint32_t unk4[8];
-   };
-
-   struct PACKED gpu_properties {
-      struct umdprivatedata_header header;
-      uint32_t unk0[550];
-      uint32_t num_engines;
-      char engines[64];
-      uint32_t unk1[5];
-      uint32_t me_fw_version;
-      uint32_t mec_fw_version;
-      uint32_t pfp_fw_version;
-      uint32_t unk3[65];
-      uint32_t device_id;
-      uint32_t family_id;
-      uint32_t chip_external_rev;
-      uint32_t chip_rev;
-      uint32_t gfx_engine_id;
-      uint32_t unk4[4];
-      uint32_t clock_crystal_freq_hz;
-      uint32_t unk5;
-      uint32_t unk6;
-      uint64_t vram_vis_size;
-      uint64_t vram_inv_size;
-      uint32_t unk7[112];
-      uint32_t gb_addr_cfg;
-      uint32_t unk8[21];
-      uint32_t num_shader_visible_vgprs;
-      uint32_t wave_front_size;
-      uint32_t num_shader_engines;
-      uint32_t num_active_rb_per_se;
-      uint32_t num_shader_arrays_per_engine;
-      uint32_t unk9[2];
-      uint32_t num_tcc_blocks;
-      uint32_t max_gs_waves_per_vgt;
-      uint32_t unk10;
-      uint32_t gs_vgt_table_depth;
-      uint32_t gs_prim_buffer_depth;
-      uint32_t unk11[23];
-      uint32_t num_cu_per_wgp;
-      uint32_t unk12[7];
-      uint16_t wgp_bitmap[6][2];
-      uint16_t wgp_ao_bitmap[6][2];
-      uint32_t unk13[10];
-      uint32_t num_sqc_per_wgp;
-      uint32_t sqc_inst_cache_size;
-      uint32_t sqc_data_cache_size;
-      uint32_t gl1c_cache_size;
-      uint32_t unk14;
-      uint32_t gl2c_cache_size;
-      uint32_t unk15[4];
-      uint32_t mall_size_mb;
-      uint32_t unk16[1824];
-      uint64_t va_start;
-      uint64_t va_end;
-      uint32_t unk17[256];
-      uint32_t large_page;
-      uint32_t unk18[220];
-      struct {
-         uint32_t start;
-         uint32_t size;
-      } ib_alignments[8];
-      uint32_t unk19[525];
-   };
-
-   struct basic_properties props1 = {0};
-   struct gpu_properties props2 = {0};
-
-   // type 0, 0, 3, 3, 0, 0
-   // uint32_t sizes[] = {2400, 2912, 2915, 2915, 3008, 17248};
-   query_adapter_info(ws, KMTQAITYPE_UMDRIVERPRIVATE, &props1, 3008);
-   query_adapter_info(ws, KMTQAITYPE_UMDRIVERPRIVATE, &props2, 17248);
-
-   /* IP Engines */
-   struct drm_amdgpu_info_hw_ip hw_ip_gfx = {
-      .hw_ip_version_major = 11,
-      .hw_ip_version_minor = 0,
-      .available_rings = 0x1,
-      .ib_start_alignment = props2.ib_alignments[0].start,
-      .ib_size_alignment = props2.ib_alignments[0].size,
-   };
-   struct drm_amdgpu_info_hw_ip hw_ip_compute = {
-      .hw_ip_version_major = 11,
-      .hw_ip_version_minor = 0,
-      .available_rings = 0xf,
-      .ib_start_alignment = props2.ib_alignments[1].start,
-      .ib_size_alignment = props2.ib_alignments[1].size,
-   };
-
-   /* Firmware versions */
-   info->me_fw_version = props2.me_fw_version;
-   info->me_fw_feature = 29;
-   info->mec_fw_version = props2.mec_fw_version;
-   info->mec_fw_feature = 29;
-   info->pfp_fw_version = props2.pfp_fw_version;
-   info->pfp_fw_feature = 29;
-
-   /* Device identification */
-   dev.chip_rev = props2.chip_rev;
-   dev.external_rev = props2.chip_external_rev;
-   dev.family = props2.family_id;
-
-   /* Shader engine info */
-   dev.num_shader_engines = props2.num_shader_engines;
-   dev.num_shader_arrays_per_engine = props2.num_shader_arrays_per_engine;
-   dev.gpu_counter_freq = props2.clock_crystal_freq_hz / 1000;
-   dev.wave_front_size = props2.wave_front_size;
-   dev.num_shader_visible_vgprs = props2.num_shader_visible_vgprs;
-   dev.num_tcc_blocks = props2.num_tcc_blocks;
-   dev.num_rb_pipes = props1.num_rb_pipes;
-   dev.enabled_rb_pipes_mask = props1.enabled_rb_pipes_mask;
-   dev.enabled_rb_pipes_mask_hi = props1.enabled_rb_pipes_mask_hi;
-
-   /* GS info */
-   dev.max_gs_waves_per_vgt = props2.max_gs_waves_per_vgt;
-   dev.gs_vgt_table_depth = props2.gs_vgt_table_depth;
-   dev.gs_prim_buffer_depth = props2.gs_prim_buffer_depth;
-
-   /* Cache sizes */
-   dev.num_sqc_per_wgp = props2.num_sqc_per_wgp;
-   dev.sqc_inst_cache_size = props2.sqc_inst_cache_size;
-   dev.sqc_data_cache_size = props2.sqc_data_cache_size;
-   dev.gl1c_cache_size = props2.gl1c_cache_size;
-   dev.gl2c_cache_size = props2.gl2c_cache_size;
-   dev.mall_size = (uint64_t)props2.mall_size_mb * 1024 * 1024;
-
-   /* Memory */
-#define PAGE_SIZE 4096
-   dev.pte_fragment_size = (1 << (props2.large_page & 0x3f)) * PAGE_SIZE;
-   dev.vram_type = kmd_to_amdgpu_vram_type(props1.vram_type);
-   dev.vram_bit_width = props1.vram_bit_width;
-   dev.virtual_address_offset = props2.va_start;
-   dev.virtual_address_max = props2.va_end;
-   mem.vram.total_heap_size = props2.vram_vis_size + props2.vram_inv_size;
-   mem.cpu_accessible_vram.total_heap_size = props2.vram_vis_size;
-
-   /* Cu Mask */
-   uint32_t w = props2.num_shader_arrays_per_engine;
-   for (uint32_t i = 0; i < props2.num_shader_engines; ++i) {
-      for (uint32_t j = 0; j < props2.num_shader_arrays_per_engine; ++j) {
-         dev.cu_bitmap[i % 4][i / 4 * w + j] = util_widen_mask(props2.wgp_bitmap[i][j], props2.num_cu_per_wgp);
-         dev.cu_ao_bitmap[i % 4][i / 4 * w + j] = util_widen_mask(props2.wgp_ao_bitmap[i][j], props2.num_cu_per_wgp);
+   /* Search static device database */
+   const struct amdgpu_device *amdgpu_dev = NULL;
+   for (size_t i = 0; i < num_amdgpu_devices; i++) {
+      if (amdgpu_devices[i].dev.device_id == dev.device_id) {
+         amdgpu_dev = &amdgpu_devices[i];
+         break;
       }
    }
 
-   info->gb_addr_config = props2.gb_addr_cfg;
-   info->num_tile_pipes = 1 << G_0098F8_NUM_PIPES(info->gb_addr_config);
+   struct drm_amdgpu_info_hw_ip hw_ip_gfx = {0};
+   struct drm_amdgpu_info_hw_ip hw_ip_compute = {0};
+   struct amdgpu_gpu_info amdinfo = {0};
+   bool has_tiling_info = false;
+
+   if (amdgpu_dev) {
+      fprintf(stderr, "radv/wddm2: Matched static device config for '%s' (0x%04x)\n",
+              amdgpu_dev->name, dev.device_id);
+      dev = amdgpu_dev->dev;
+      dev.device_id = query_ids.DeviceIds.DeviceID;
+      dev.pci_rev = query_ids.DeviceIds.RevisionID;
+
+      hw_ip_gfx = amdgpu_dev->hw_ip_gfx;
+      hw_ip_compute = amdgpu_dev->hw_ip_compute;
+
+      info->me_fw_version = amdgpu_dev->fw_gfx_me.ver;
+      info->me_fw_feature = amdgpu_dev->fw_gfx_me.feature;
+      info->mec_fw_version = amdgpu_dev->fw_gfx_mec.ver;
+      info->mec_fw_feature = amdgpu_dev->fw_gfx_mec.feature;
+      info->pfp_fw_version = amdgpu_dev->fw_gfx_pfp.ver;
+      info->pfp_fw_feature = amdgpu_dev->fw_gfx_pfp.feature;
+
+      if (mem.vram.total_heap_size == 0) {
+         mem.vram.total_heap_size = amdgpu_dev->mem.vram.total_heap_size;
+         mem.cpu_accessible_vram.total_heap_size = amdgpu_dev->mem.cpu_accessible_vram.total_heap_size;
+      }
+      if (mem.gtt.total_heap_size == 0) {
+         mem.gtt.total_heap_size = amdgpu_dev->mem.gtt.total_heap_size;
+      }
+
+      /* Populate tiling info from mmr_regs */
+      amdinfo.family_id = amdgpu_dev->dev.family;
+      amdinfo.chip_external_rev = amdgpu_dev->dev.external_rev;
+      memcpy(&amdinfo.cu_bitmap[0][0], &amdgpu_dev->dev.cu_bitmap[0][0], sizeof(amdinfo.cu_bitmap));
+
+      for (uint32_t j = 0; j < amdgpu_dev->mmr_reg_count; j++) {
+         uint32_t reg = amdgpu_dev->mmr_regs[j * 3];
+         uint32_t val = amdgpu_dev->mmr_regs[j * 3 + 2];
+         if (reg == 0x263e) {
+            amdinfo.gb_addr_cfg = val;
+         } else if (reg == 0x9d8) {
+            amdinfo.mc_arb_ramcfg = val;
+         } else if (reg >= 0x2644 && reg < 0x2644 + 32) {
+            amdinfo.gb_tile_mode[reg - 0x2644] = val;
+         } else if (reg >= 0x2664 && reg < 0x2664 + 16) {
+            amdinfo.gb_macro_tile_mode[reg - 0x2664] = val;
+         }
+      }
+      has_tiling_info = true;
+      info->gb_addr_config = amdinfo.gb_addr_cfg;
+      info->num_tile_pipes = amdgpu_dev->dev.num_rb_pipes;
+   } else {
+      /* Fallback to dynamic RDNA3 KMD structure query */
+      struct PACKED umdprivatedata_header {
+         uint32_t flags[3];
+         uint32_t vendor_id;
+         uint32_t unknown0;
+         uint32_t pci_id;
+         uint32_t unknown1[9];
+         uint16_t registry_path[100];
+         uint32_t padding[490];
+         uint32_t type;
+         uint32_t something;
+         uint32_t unknown2[42];
+         uint32_t size;
+      };
+
+      struct PACKED basic_properties {
+         struct umdprivatedata_header header;
+         uint32_t unk0[11];
+         uint32_t device_id;
+         uint32_t family_id;
+         uint32_t chip_external_rev;
+         uint32_t subsystem_id;
+         uint32_t unk1[6];
+         uint32_t vram_type;
+         uint32_t vram_bit_width;
+         uint32_t unk2[43];
+         char umd_registry_path[256];
+         uint32_t unk3[18];
+         uint32_t num_rb_pipes;
+         uint32_t num_enabled_rb_pipes;
+         uint32_t enabled_rb_pipes_mask;
+         uint32_t enabled_rb_pipes_mask_hi;
+         uint32_t unk4[8];
+      };
+
+      struct PACKED gpu_properties {
+         struct umdprivatedata_header header;
+         uint32_t unk0[550];
+         uint32_t num_engines;
+         char engines[64];
+         uint32_t unk1[5];
+         uint32_t me_fw_version;
+         uint32_t mec_fw_version;
+         uint32_t pfp_fw_version;
+         uint32_t unk3[65];
+         uint32_t device_id;
+         uint32_t family_id;
+         uint32_t chip_external_rev;
+         uint32_t chip_rev;
+         uint32_t gfx_engine_id;
+         uint32_t unk4[4];
+         uint32_t clock_crystal_freq_hz;
+         uint32_t unk5;
+         uint32_t unk6;
+         uint64_t vram_vis_size;
+         uint64_t vram_inv_size;
+         uint32_t unk7[112];
+         uint32_t gb_addr_cfg;
+         uint32_t unk8[21];
+         uint32_t num_shader_visible_vgprs;
+         uint32_t wave_front_size;
+         uint32_t num_shader_engines;
+         uint32_t num_active_rb_per_se;
+         uint32_t num_shader_arrays_per_engine;
+         uint32_t unk9[2];
+         uint32_t num_tcc_blocks;
+         uint32_t max_gs_waves_per_vgt;
+         uint32_t unk10;
+         uint32_t gs_vgt_table_depth;
+         uint32_t gs_prim_buffer_depth;
+         uint32_t unk11[23];
+         uint32_t num_cu_per_wgp;
+         uint32_t unk12[7];
+         uint16_t wgp_bitmap[6][2];
+         uint16_t wgp_ao_bitmap[6][2];
+         uint32_t unk13[10];
+         uint32_t num_sqc_per_wgp;
+         uint32_t sqc_inst_cache_size;
+         uint32_t sqc_data_cache_size;
+         uint32_t gl1c_cache_size;
+         uint32_t unk14;
+         uint32_t gl2c_cache_size;
+         uint32_t unk15[4];
+         uint32_t mall_size_mb;
+         uint32_t unk16[1824];
+         uint64_t va_start;
+         uint64_t va_end;
+         uint32_t unk17[256];
+         uint32_t large_page;
+         uint32_t unk18[220];
+         struct {
+            uint32_t start;
+            uint32_t size;
+         } ib_alignments[8];
+         uint32_t unk19[525];
+      };
+
+      struct basic_properties props1 = {0};
+      struct gpu_properties props2 = {0};
+
+      query_adapter_info(ws, KMTQAITYPE_UMDRIVERPRIVATE, &props1, sizeof(props1));
+      query_adapter_info(ws, KMTQAITYPE_UMDRIVERPRIVATE, &props2, sizeof(props2));
+
+      /* IP Engines */
+      hw_ip_gfx.hw_ip_version_major = 11;
+      hw_ip_gfx.hw_ip_version_minor = 0;
+      hw_ip_gfx.available_rings = 0x1;
+      hw_ip_gfx.ib_start_alignment = props2.ib_alignments[0].start;
+      hw_ip_gfx.ib_size_alignment = props2.ib_alignments[0].size;
+
+      hw_ip_compute.hw_ip_version_major = 11;
+      hw_ip_compute.hw_ip_version_minor = 0;
+      hw_ip_compute.available_rings = 0xf;
+      hw_ip_compute.ib_start_alignment = props2.ib_alignments[1].start;
+      hw_ip_compute.ib_size_alignment = props2.ib_alignments[1].size;
+
+      /* Firmware versions */
+      info->me_fw_version = props2.me_fw_version;
+      info->me_fw_feature = 29;
+      info->mec_fw_version = props2.mec_fw_version;
+      info->mec_fw_feature = 29;
+      info->pfp_fw_version = props2.pfp_fw_version;
+      info->pfp_fw_feature = 29;
+
+      /* Device identification */
+      dev.chip_rev = props2.chip_rev;
+      dev.external_rev = props2.chip_external_rev;
+      dev.family = props2.family_id;
+
+      /* Shader engine info */
+      dev.num_shader_engines = props2.num_shader_engines;
+      dev.num_shader_arrays_per_engine = props2.num_shader_arrays_per_engine;
+      dev.gpu_counter_freq = props2.clock_crystal_freq_hz / 1000;
+      dev.wave_front_size = props2.wave_front_size;
+      dev.num_shader_visible_vgprs = props2.num_shader_visible_vgprs;
+      dev.num_tcc_blocks = props2.num_tcc_blocks;
+      dev.num_rb_pipes = props1.num_rb_pipes;
+      dev.enabled_rb_pipes_mask = props1.enabled_rb_pipes_mask;
+      dev.enabled_rb_pipes_mask_hi = props1.enabled_rb_pipes_mask_hi;
+
+      /* GS info */
+      dev.max_gs_waves_per_vgt = props2.max_gs_waves_per_vgt;
+      dev.gs_vgt_table_depth = props2.gs_vgt_table_depth;
+      dev.gs_prim_buffer_depth = props2.gs_prim_buffer_depth;
+
+      /* Cache sizes */
+      dev.num_sqc_per_wgp = props2.num_sqc_per_wgp;
+      dev.sqc_inst_cache_size = props2.sqc_inst_cache_size;
+      dev.sqc_data_cache_size = props2.sqc_data_cache_size;
+      dev.gl1c_cache_size = props2.gl1c_cache_size;
+      dev.gl2c_cache_size = props2.gl2c_cache_size;
+      dev.mall_size = (uint64_t)props2.mall_size_mb * 1024 * 1024;
+
+      /* Memory */
+#define PAGE_SIZE 4096
+      dev.pte_fragment_size = (1 << (props2.large_page & 0x3f)) * PAGE_SIZE;
+      dev.vram_type = kmd_to_amdgpu_vram_type(props1.vram_type);
+      dev.vram_bit_width = props1.vram_bit_width;
+      dev.virtual_address_offset = props2.va_start;
+      dev.virtual_address_max = props2.va_end;
+      mem.vram.total_heap_size = props2.vram_vis_size + props2.vram_inv_size;
+      mem.cpu_accessible_vram.total_heap_size = props2.vram_vis_size;
+
+      /* Cu Mask */
+      uint32_t w = props2.num_shader_arrays_per_engine;
+      for (uint32_t i = 0; i < props2.num_shader_engines; ++i) {
+         for (uint32_t j = 0; j < props2.num_shader_arrays_per_engine; ++j) {
+            dev.cu_bitmap[i % 4][i / 4 * w + j] = util_widen_mask(props2.wgp_bitmap[i][j], props2.num_cu_per_wgp);
+            dev.cu_ao_bitmap[i % 4][i / 4 * w + j] = util_widen_mask(props2.wgp_ao_bitmap[i][j], props2.num_cu_per_wgp);
+         }
+      }
+
+      info->gb_addr_config = props2.gb_addr_cfg;
+      info->num_tile_pipes = 1 << G_0098F8_NUM_PIPES(info->gb_addr_config);
+   }
 
    info->pcie_gen = 4;
    info->pcie_num_lanes = 16;
@@ -391,7 +476,9 @@ radv_wddm2_fill_gpu_info(struct radv_wddm2_winsys *ws,
    ac_identify_chip(info, &dev);
    ac_fill_memory_info(info, &dev, &mem);
    ac_fill_hw_info(info, &dev);
-   //ac_fill_tiling_info(info, &gpu_info);
+   if (has_tiling_info) {
+      ac_fill_tiling_info(info, &amdinfo);
+   }
    ac_fill_feature_info(info, &dev);
    ac_fill_bug_info(info);
    ac_fill_tess_info(info);
