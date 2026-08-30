@@ -2358,6 +2358,19 @@ wsi_common_queue_present(const struct wsi_device *wsi,
                   continue;
             }
 
+            /* Queue the RADV image->buffer copy on the app queue now, before
+             * signaling the blit timeline.  That timeline is the D3D12 fence
+             * that wsi_dxgi_blit waits on before doing the D3D12 buffer ->
+             * backbuffer copy, so this guarantees the copy is complete before
+             * D3D12 reads the shared buffer. */
+            if (swapchain->blit.type != WSI_SWAPCHAIN_NO_BLIT) {
+               command_buffer_infos[command_buffer_count++] = (VkCommandBufferSubmitInfo) {
+                  .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
+                  .commandBuffer =
+                     image->blit.cmd_buffers[queue->queue_family_index],
+               };
+            }
+
             signal_semaphore_infos[signal_semaphore_count++] = (VkSemaphoreSubmitInfo) {
                .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
                .stageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
@@ -2857,7 +2870,8 @@ wsi_cmd_blit_image_to_buffer(VkCommandBuffer cmd_buffer,
                              uint32_t qfi)
 {
    assert(info->image_type == WSI_IMAGE_TYPE_CPU ||
-          info->image_type == WSI_IMAGE_TYPE_DRM);
+          info->image_type == WSI_IMAGE_TYPE_DRM ||
+          info->image_type == WSI_IMAGE_TYPE_DXGI);
 
    VkImageMemoryBarrier img_mem_barrier = {
       .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,

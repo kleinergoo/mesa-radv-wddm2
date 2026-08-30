@@ -466,43 +466,18 @@ wsi_dxgi_create_d3d12_resource(struct wsi_win32_swapchain *chain,
 
    /* Use a D3D12 BUFFER for the RADV blit target so RADV writes plain
     * row-major bytes that D3D12 can upload to the tiled swapchain buffer
-    * via CopyTextureRegion with a placed footprint. The (aligned) row
-    * stride must match the linear layout RADV computes for the image. */
-   unsigned bpp = 4;
-   switch (chain->base.image_info.create.format) {
-   case VK_FORMAT_R8G8_UNORM:
-   case VK_FORMAT_R16_UNORM:
-      bpp = 2;
-      break;
-   case VK_FORMAT_R8_UNORM:
-      bpp = 1;
-      break;
-   default:
-      bpp = 4;
-      break;
-   }
-
-   chain->blit_row_pitch = align(chain->extent.width * bpp, 256);
-
-   /* Query RADV's actual linear layout so the D3D12 buffer size and the
-    * placed footprint row pitch match exactly how RADV writes the pixels. */
-   VkSubresourceLayout sub_layout;
-   const struct wsi_device *v_wsi = chain->base.wsi;
-   VkImageSubresource sub_res = {
-      VK_IMAGE_ASPECT_COLOR_BIT,
-      0, /* mipLevel */
-      0, /* arrayLayer */
-   };
-   v_wsi->GetImageSubresourceLayout(chain->base.device, win32_image->base.image,
-                                    &sub_res, &sub_layout);
-   if (sub_layout.rowPitch)
-      chain->blit_row_pitch = sub_layout.rowPitch;
+    * via CopyTextureRegion with a placed footprint.
+    *
+    * The RADV render image is now tiled (DCC), so use the linear buffer blit
+    * stride/size computed by wsi_configure_buffer_image.  The D3D12 buffer
+    * must be row-major with this exact stride so the placed footprint matches
+    * what RADV writes via CmdCopyImageToBuffer. */
+   chain->blit_row_pitch = chain->base.image_info.linear_stride;
 
    D3D12_RESOURCE_DESC desc = {};
    desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
    desc.Alignment = 0;
-   desc.Width = sub_layout.size ? sub_layout.size :
-                (uint64_t)chain->blit_row_pitch * chain->extent.height;
+   desc.Width = chain->base.image_info.linear_size;
    desc.Height = 1;
    desc.DepthOrArraySize = 1;
    desc.MipLevels = 1;
@@ -634,6 +609,10 @@ wsi_dxgi_finish_create_image(const struct wsi_swapchain *chain,
    struct wsi_win32_image *win32_image =
       container_of(image, struct wsi_win32_image, base);
 
+   VkResult result = wsi_finish_create_blit_context(chain, info, image);
+   if (result != VK_SUCCESS)
+      return result;
+
    return wsi_dxgi_create_blit_context(win32_chain, win32_image);
 }
 
@@ -678,15 +657,13 @@ wsi_create_dxgi_image_mem(const struct wsi_swapchain *drv_chain,
       NULL,
    };
 
-   assert(chain->base.blit.type != WSI_SWAPCHAIN_BUFFER_BLIT);
-
    struct wsi_win32_image *win32_image =
       container_of(image, struct wsi_win32_image, base);
    uint32_t image_idx =
       ((uintptr_t)win32_image - (uintptr_t)chain->images) /
       sizeof(*win32_image);
    if (FAILED(chain->dxgi->GetBuffer(image_idx,
-                                     IID_PPV_ARGS(&win32_image->dxgi.swapchain_res))))
+                                      IID_PPV_ARGS(&win32_image->dxgi.swapchain_res))))
       return VK_ERROR_OUT_OF_DEVICE_MEMORY;
 
    if (wsi->win32.create_image_memory) {
@@ -721,6 +698,57 @@ wsi_create_dxgi_image_mem(const struct wsi_swapchain *drv_chain,
                                                        &import_memory_info.handle);
       if (result != VK_SUCCESS)
          return result;
+
+      /* blit.buffer: a plain linear buffer backed by the shared D3D12 buffer.
+       * On present, RADV does CmdCopyImageToBuffer (tiled DCC image -> this
+       * buffer) and D3D12 then copies it into the swapchain buffer. */
+      const VkExternalMemoryBufferCreateInfo buffer_external_info = {
+         VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO,
+         NULL,
+         VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D12_RESOURCE_BIT,
+      };
+      const VkBufferCreateInfo buffer_info = {
+         VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+         &buffer_external_info,
+         0,
+         info->linear_size,
+         VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+         VK_SHARING_MODE_EXCLUSIVE,
+      };
+      result = wsi->CreateBuffer(chain->base.device, &buffer_info,
+                                 &chain->base.alloc, &image->blit.buffer);
+      if (result != VK_SUCCESS)
+         return result;
+
+      VkMemoryRequirements blit_reqs;
+      wsi->GetBufferMemoryRequirements(chain->base.device, image->blit.buffer,
+                                       &blit_reqs);
+
+      const VkMemoryDedicatedAllocateInfo blit_mem_dedicated_info = {
+         VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO,
+         NULL,
+         VK_NULL_HANDLE,
+         image->blit.buffer,
+      };
+      VkMemoryAllocateInfo blit_mem_info = {
+         VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+         &blit_mem_dedicated_info,
+         info->linear_size,
+         info->select_blit_dst_memory_type(wsi, blit_reqs.memoryTypeBits),
+      };
+      __vk_append_struct(&blit_mem_info, &import_memory_info);
+
+      result = wsi->AllocateMemory(chain->base.device, &blit_mem_info,
+                                   &chain->base.alloc, &image->blit.memory);
+      if (result != VK_SUCCESS)
+         return result;
+
+      image->blit.to_foreign_queue = true;
+
+      result = wsi->BindBufferMemory(chain->base.device, image->blit.buffer,
+                                     image->blit.memory, 0);
+      if (result != VK_SUCCESS)
+         return result;
    }
 
    VkMemoryRequirements reqs;
@@ -739,9 +767,6 @@ wsi_create_dxgi_image_mem(const struct wsi_swapchain *drv_chain,
       info->select_image_memory_type(wsi, reqs.memoryTypeBits),
    };
 
-   if (!wsi->win32.create_image_memory)
-      __vk_append_struct(&memory_info, &import_memory_info);
-
    return wsi->AllocateMemory(chain->base.device, &memory_info,
                               &chain->base.alloc, &image->memory);
 }
@@ -752,9 +777,9 @@ wsi_dxgi_image_needs_blit(const struct wsi_device *wsi,
                           VkDevice device)
 {
    if (wsi->win32.requires_blits && wsi->win32.requires_blits(device))
-      return WSI_SWAPCHAIN_IMAGE_BLIT;
+      return WSI_SWAPCHAIN_BUFFER_BLIT;
    else if (params->storage_image)
-      return WSI_SWAPCHAIN_IMAGE_BLIT;
+      return WSI_SWAPCHAIN_BUFFER_BLIT;
    return WSI_SWAPCHAIN_NO_BLIT;
 }
 
@@ -774,12 +799,13 @@ wsi_dxgi_configure_image(const struct wsi_swapchain *chain,
    info->create_mem = wsi_create_dxgi_image_mem;
 
    if (chain->blit.type != WSI_SWAPCHAIN_NO_BLIT) {
-      /* The DXGI blit path hands RADV's rendered image to D3D12 as a plain
-       * row-major buffer (placed footprint), so the RADV image must be
-       * allocated linear so the pixel layout is well-defined and matches the
-       * stride we report to D3D12. */
-      info->create.tiling = VK_IMAGE_TILING_LINEAR;
-      wsi_configure_image_blit_image(chain, info);
+      /* Keep the swapchain image tiled (DCC) so rendering is fast, and on
+       * present blit it into a linear D3D12-imported buffer via
+       * CmdCopyImageToBuffer.  The linear stride must match the placed
+       * footprint row pitch that D3D12 uses when copying the buffer into the
+       * swapchain buffer, hence the 256-byte (D3D12_TEXTURE_DATA_PITCH_ALIGNMENT)
+       * stride alignment. */
+      wsi_configure_buffer_image(chain, pCreateInfo, 256, 4096, info);
       info->select_image_memory_type = wsi_select_device_memory_type;
       info->select_blit_dst_memory_type = wsi_select_device_memory_type;
       if (!wsi->win32.create_image_memory)
