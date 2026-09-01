@@ -599,6 +599,13 @@ radv_wddm2_winsys_destroy(struct radeon_winsys *_ws)
    if (!destroy)
       return;
 
+   radv_wddm2_bo_destroy_deferred_all(ws);
+
+   radv_winsys_bo_list_destroy(&ws->global_bo_list);
+   radv_winsys_bo_log_destroy(&ws->bo_log);
+
+   radv_wddm2_wsi_finish(ws);
+
    D3DDDI_DESTROYPAGINGQUEUE destroy_paging_queue = {
       .hPagingQueue = ws->paging_queue_h,
    };
@@ -616,13 +623,6 @@ radv_wddm2_winsys_destroy(struct radeon_winsys *_ws)
    };
    status = WDDM2_DISPATCH(CloseAdapter(&close_adapter));
    assert(NT_SUCCESS(status));
-
-   radv_wddm2_bo_destroy_deferred_all(ws);
-
-   radv_winsys_bo_list_destroy(&ws->global_bo_list);
-   radv_winsys_bo_log_destroy(&ws->bo_log);
-
-   radv_wddm2_wsi_finish(ws);
 
    FREE(ws);
 }
@@ -752,10 +752,6 @@ radv_wddm2_winsys_create(const struct vk_dx_adapter_info *adapter_info,
       goto error_open_adapter;
    }
 
-   D3DKMT_CLOSEADAPTER close_adapter = {
-      .hAdapter = ws->adapter_h,
-   };
-
    D3DKMT_CREATEDEVICE create_device = {
       .hAdapter = ws->adapter_h,
    };
@@ -767,10 +763,6 @@ radv_wddm2_winsys_create(const struct vk_dx_adapter_info *adapter_info,
    }
 
    ws->device_h = create_device.hDevice;
-
-   D3DKMT_DESTROYDEVICE destroy_device = {
-      .hDevice = ws->device_h,
-   };
 
    D3DKMT_CREATEPAGINGQUEUE create_paging_queue = {
       .hDevice = ws->device_h,
@@ -815,12 +807,22 @@ radv_wddm2_winsys_create(const struct vk_dx_adapter_info *adapter_info,
    return result;
 
 error_create_device:
-   status = WDDM2_DISPATCH(DestroyDevice(&destroy_device));
-   assert(NT_SUCCESS(status));
+   {
+      D3DKMT_DESTROYDEVICE destroy_device = {
+         .hDevice = ws->device_h,
+      };
+      status = WDDM2_DISPATCH(DestroyDevice(&destroy_device));
+      assert(NT_SUCCESS(status));
+   }
 
 error_open_adapter:
-   status = WDDM2_DISPATCH(CloseAdapter(&close_adapter));
-   assert(NT_SUCCESS(status));
+   {
+      D3DKMT_CLOSEADAPTER close_adapter = {
+         .hAdapter = ws->adapter_h,
+      };
+      status = WDDM2_DISPATCH(CloseAdapter(&close_adapter));
+      assert(NT_SUCCESS(status));
+   }
 
 error_ptr_alloc:
    FREE(ws);

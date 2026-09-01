@@ -486,24 +486,6 @@ radv_wddm2_bo_create_internal(struct radeon_winsys *_ws, uint64_t size, unsigned
       }
    };
 
-#if 0
-   fprintf(stdout, "pArgs (%zi bytes):\n", sizeof(create));
-   print_hex_data(stdout, &create, sizeof(create));
-   fprintf(stdout, "pPrivateDriverData (%zi bytes):\n", sizeof(create_pdata));
-   print_hex_data(stdout, &create_pdata, sizeof(create_pdata));
-   fprintf(stdout, "child (%zi bytes):\n", sizeof(alloc_info));
-   print_hex_data(stdout, &alloc_info, sizeof(alloc_info));
-   fprintf(stdout, "child.pPrivateDriverData (%i bytes):\n", pdata_size);
-   print_hex_data(stdout, alloc_pdata, pdata_size);
-   fflush(stdout);
-#endif
-
-   /*bo->base.va = radv_wddm2_bo_va_alloc(ws, flags, phys_size, virt_alignment);
-   if (bo->base.va == 0) {
-      result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
-      goto error_create;
-   }*/
-
    status = WDDM2_DISPATCH(CreateAllocation2(&create));
    if (!NT_SUCCESS(status)) {
       fprintf(stderr, "CreateAllocation2 failed 0x%X\n", status);
@@ -514,7 +496,6 @@ radv_wddm2_bo_create_internal(struct radeon_winsys *_ws, uint64_t size, unsigned
    bo->base.obj_id = alloc_info.hAllocation;
    bo->base.size = phys_size;
    bo->base.handle = alloc_info.hAllocation;
-   fprintf(stderr, "allocation handle=0x%x\n", bo->base.handle);
 
    const D3DKMT_DESTROYALLOCATION2 destroy = {
       .hDevice = ws->device_h,
@@ -530,7 +511,7 @@ radv_wddm2_bo_create_internal(struct radeon_winsys *_ws, uint64_t size, unsigned
       max = RADV_WDDM2_REPLAY_HEAP_START + (4ull << 32);
    D3DDDI_MAPGPUVIRTUALADDRESS map = {
       .hPagingQueue = ws->paging_queue_h,
-      .BaseAddress = address, //0, //bo->base.va == 0x100002000 ? 0 : bo->base.va,
+      .BaseAddress = address,
       .MinimumAddress = min,
       .MaximumAddress = max,
       .hAllocation = bo->base.handle,
@@ -590,14 +571,10 @@ radv_wddm2_bo_create_internal(struct radeon_winsys *_ws, uint64_t size, unsigned
    return VK_SUCCESS;
 
 error_va_alloc:
-   //radv_wddm2_bo_va_free(ws, flags, bo->base.va, bo->base.size);
-
-   fprintf(stderr, "destroy allocation\n");
    status = WDDM2_DISPATCH(DestroyAllocation2(&destroy));
    assert(NT_SUCCESS(status));
 
 error_ptr_alloc:
-   fprintf(stderr, "free va\n");
    FREE(bo);
    return result;
 }
@@ -861,7 +838,6 @@ radv_wddm2_bo_make_resident(struct radeon_winsys *_ws, struct radeon_winsys_bo *
    if (all_resident)
       return VK_SUCCESS;
 
-   //fprintf(stderr, "make resident \n");
    struct radv_wddm2_winsys *ws = radv_wddm2_winsys(_ws);
    struct radv_wddm2_bo *bo = radv_wddm2_bo(_bo);
    NTSTATUS status;
@@ -875,7 +851,7 @@ radv_wddm2_bo_make_resident(struct radeon_winsys *_ws, struct radeon_winsys_bo *
             .MustSucceed = 1,
          },
       };
-      status = D3DKMTMakeResident(&make_resident);
+      status = WDDM2_DISPATCH(MakeResident(&make_resident));
       if (!NT_SUCCESS(status))
          return VK_ERROR_OUT_OF_DEVICE_MEMORY;
 
@@ -885,7 +861,7 @@ radv_wddm2_bo_make_resident(struct radeon_winsys *_ws, struct radeon_winsys_bo *
          .ObjectHandleArray = &ws->paging_fence_h,
          .FenceValueArray = &make_resident.PagingFenceValue,
       };
-      status = D3DKMTWaitForSynchronizationObjectFromCpu(&wait);
+      status = WDDM2_DISPATCH(WaitForSynchronizationObjectFromCpu(&wait));
       if (!NT_SUCCESS(status))
          return VK_ERROR_OUT_OF_DEVICE_MEMORY;
    } else {
@@ -918,10 +894,8 @@ radv_wddm2_bo_destroy_now(struct radv_wddm2_winsys *ws, struct radv_wddm2_bo *bo
          .Flags.EvictOnlyIfNecessary = false,
       };
       status = WDDM2_DISPATCH(Evict(&evict));
-      if (!NT_SUCCESS(status)) {
-         fprintf(stderr, "*****  Evict failed\n");
-         return;
-      }
+      if (!NT_SUCCESS(status))
+         fprintf(stderr, "radv/wddm2: Evict failed 0x%X\n", status);
    }
 
    radv_wddm2_bo_unmap(_ws, _bo, false);
@@ -940,15 +914,12 @@ radv_wddm2_bo_destroy_now(struct radv_wddm2_winsys *ws, struct radv_wddm2_bo *bo
          .AllocationCount = 1,
       };
       status = WDDM2_DISPATCH(DestroyAllocation2(&destroy));
-      //assert(NT_SUCCESS(status));
 
       if (ws->debug_all_bos)
          radv_winsys_bo_list_del(&ws->global_bo_list, &bo->base);
       if (ws->debug_log_bos)
          radv_winsys_log_bo(&ws->bo_log, &bo->base, true);
    }
-
-   //radv_wddm2_bo_va_free(ws, bo->flags, bo->base.va, bo->base.size);
 
    FREE(bo);
 }
@@ -988,18 +959,22 @@ radv_wddm2_bo_destroy(struct radeon_winsys *_ws, struct radeon_winsys_bo *_bo)
    /* A chained IB / command buffer BO must not be torn down while a previously
     * submitted command stream may still reference its VA via an INDIRECT_BUFFER
     * chain, otherwise that VA can be reused and the GPU would fault executing
-    * stale content. If the GFX queue still has in-flight work, defer the real
+    * stale content. If any queue still has in-flight work, defer the real
     * destroy until that fence retires. */
-   struct vk_wddm2_fence *last = &ws->last_submission[AMD_IP_GFX];
-   if (last->handle != 0 && p_atomic_read(last->value_map) < last->wait_value) {
-      struct radv_wddm2_deferred_bo *d = calloc(1, sizeof(*d));
-      if (d) {
-         d->bo = bo;
-         d->fence = *last;
-         simple_mtx_lock(&ws->deferred_mtx);
-         list_addtail(&d->list, &ws->deferred_list);
-         simple_mtx_unlock(&ws->deferred_mtx);
-         return;
+   for (unsigned ip = 0; ip < AMD_NUM_IP_TYPES; ip++) {
+      struct vk_wddm2_fence *last = &ws->last_submission[ip];
+      if (last->handle != 0 && p_atomic_read(last->value_map) < last->wait_value) {
+         struct radv_wddm2_deferred_bo *d = calloc(1, sizeof(*d));
+         if (d) {
+            d->bo = bo;
+            d->fence = *last;
+            simple_mtx_lock(&ws->deferred_mtx);
+            list_addtail(&d->list, &ws->deferred_list);
+            simple_mtx_unlock(&ws->deferred_mtx);
+            return;
+         } else {
+            fprintf(stderr, "radv/wddm2: out of memory allocating deferred BO\n");
+         }
       }
    }
 
@@ -1067,7 +1042,7 @@ radv_wddm2_virtual_bo_map(struct radv_wddm2_winsys *ws, struct radv_wddm2_ctx *c
 
    NTSTATUS status = WDDM2_DISPATCH(UpdateGpuVirtualAddress(&update));
    if (!NT_SUCCESS(status)) {
-      fprintf(stdout, "mapping 0x%" PRIx64 " failed: 0x%X\n", parent->base.va + offset, status);
+      fprintf(stderr, "mapping 0x%" PRIx64 " failed: 0x%X\n", parent->base.va + offset, status);
       return VK_ERROR_OUT_OF_DEVICE_MEMORY;
    }
    return VK_SUCCESS;
@@ -1145,7 +1120,6 @@ radv_wddm2_dump_bo_ranges(struct radeon_winsys *_ws, FILE *file)
 {
    struct radv_wddm2_winsys *ws = radv_wddm2_winsys(_ws);
 
-   fprintf(stderr, "dump bo ranges\n");
    if (ws->debug_all_bos)
       radv_winsys_dump_bo_ranges(&ws->global_bo_list, file);
    else

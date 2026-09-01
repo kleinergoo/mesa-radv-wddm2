@@ -160,12 +160,17 @@ submit_pdd_writer_reserve(struct submit_pdd_writer *writer, unsigned size)
    if (writer->offset + size > writer->buffer_size) {
       uint8_t *old_buffer = writer->buffer;
       writer->buffer_size = MAX2(writer->buffer_size * 2, writer->offset + size);
-      writer->buffer = malloc(writer->buffer_size);
-      if (!writer->buffer)
-         return NULL;
-      memcpy(writer->buffer, old_buffer, writer->offset);
-      if (old_buffer != writer->inline_data)
-         free(old_buffer);
+      if (old_buffer == writer->inline_data) {
+         writer->buffer = malloc(writer->buffer_size);
+         if (!writer->buffer)
+            return NULL;
+         memcpy(writer->buffer, old_buffer, writer->offset);
+      } else {
+         uint8_t *new_buffer = realloc(old_buffer, writer->buffer_size);
+         if (!new_buffer)
+            return NULL;
+         writer->buffer = new_buffer;
+      }
    }
    void *ptr = writer->buffer + writer->offset;
    memset(ptr, 0, size);
@@ -401,8 +406,9 @@ vk_wddm2_fence_wait(uint32_t device_h, struct vk_wddm2_fence *fence)
       .hDevice = device_h,
       .StateType = D3DKMT_DEVICESTATE_EXECUTION,
    };
+   status = WDDM2_DISPATCH(GetDeviceState(&get_state));
 
-   if (get_state.ExecutionState == D3DKMT_DEVICEEXECUTION_ERROR_DMAPAGEFAULT) {
+   if (NT_SUCCESS(status) && get_state.ExecutionState == D3DKMT_DEVICEEXECUTION_ERROR_DMAPAGEFAULT) {
       get_state.StateType = D3DKMT_DEVICESTATE_PAGE_FAULT;
       status = WDDM2_DISPATCH(GetDeviceState(&get_state));
       D3DKMT_DEVICEPAGEFAULT_STATE fault = get_state.PageFaultState;
@@ -469,11 +475,6 @@ radv_wddm2_cs_create(struct radeon_winsys *rws, enum amd_ip_type ip_type, bool i
    return &cs->base.base;
 }
 
-static unsigned
-radv_wddm2_cs_num_ibs(UNUSED const struct radv_wddm2_cs *cs)
-{
-   return 1;
-}
 
 static uint32_t
 radv_wddm2_cs_translate_ip_type(enum amd_ip_type ip_type)
@@ -838,6 +839,10 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
        * destruction can retire once the GPU has passed this point, preventing a
        * chained IB VA from being reused while still referenced. */
       ctx->ws->last_submission[submit->ip_type] = ctx->per_ip[submit->ip_type].last_submission;
+      if (!submit->is_gang && submit->ip_type == AMD_IP_COMPUTE) {
+         ctx->per_ip[AMD_IP_GFX].last_submission = ctx->per_ip[submit->ip_type].last_submission;
+         ctx->ws->last_submission[AMD_IP_GFX] = ctx->per_ip[submit->ip_type].last_submission;
+      }
       radv_wddm2_bo_deferred_drain(ctx->ws);
    }
 
@@ -859,7 +864,6 @@ radv_wddm2_cs_init_functions(struct radv_wddm2_winsys *ws)
    ws->base.cs_unchain = radv_winsys_cs_unchain;
    ws->base.cs_destroy = radv_wddm2_cs_destroy;
    ws->base.cs_grow = radv_winsys_cs_grow;
-   ws->base.cs_reset = radv_wddm2_cs_reset;
    ws->base.cs_add_buffer = radv_wddm2_cs_add_buffer;
    ws->base.cs_submit = radv_wddm2_cs_submit;
    ws->base.cs_execute_secondary = radv_wddm2_cs_execute_secondary;
