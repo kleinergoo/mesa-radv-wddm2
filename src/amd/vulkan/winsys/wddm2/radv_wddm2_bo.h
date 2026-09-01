@@ -53,5 +53,7 @@ radv_wddm2_bo(struct radeon_winsys_bo *bo)
 }
 
 void radv_wddm2_bo_init_functions(struct radv_wddm2_winsys *ws);
+void radv_wddm2_bo_deferred_drain(struct radv_wddm2_winsys *ws);
+void radv_wddm2_bo_destroy_deferred_all(struct radv_wddm2_winsys *ws);
 
 #endif /* RADV_WDDM2_BO_H */

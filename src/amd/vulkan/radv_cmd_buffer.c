@@ -15434,6 +15434,13 @@ radv_emit_set_predication_state(struct radv_cmd_buffer *cmd_buffer, bool draw_vi
    struct radv_cmd_stream *cs = cmd_buffer->cs;
    uint32_t op = 0;
 
+   /* PT-BISECT: RADV_WDDM2_BISECT=predoff disables the SET_PREDICATION
+    * packet entirely so we can test whether the occlusion-query predicate
+    * (whose address faults the GPU) is the trigger for the device-lost. */
+   if (getenv("RADV_WDDM2_BISECT") &&
+       strcmp(getenv("RADV_WDDM2_BISECT"), "predoff") == 0)
+      return;
+
    radeon_check_space(device->ws, cs->b, 4);
 
    if (va) {

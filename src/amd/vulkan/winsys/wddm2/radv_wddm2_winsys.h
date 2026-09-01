@@ -39,6 +39,20 @@
 
 struct vk_sync_type;
 
+struct vk_wddm2_fence {
+   uint32_t handle;
+   uint64_t wait_value;
+   uint64_t *value_map;
+};
+
+/* A BO whose real destroy (VA free / allocation destroy) has been deferred so a
+ * still-in-flight submit that references its VA via an INDIRECT_BUFFER chain can
+ * never dangle into a reused address. Freed once the tagged fence retires. */
+struct radv_wddm2_deferred_bo {
+   struct list_head list;
+   struct vk_wddm2_fence fence;
+   struct radv_wddm2_bo *bo;
+};
 
 struct radv_wddm2_winsys {
    struct radeon_winsys base;
@@ -65,6 +79,11 @@ struct radv_wddm2_winsys {
 
    struct radv_winsys_bo_list global_bo_list;
    struct radv_winsys_bo_log bo_log;
+
+   simple_mtx_t deferred_mtx;
+   struct list_head deferred_list;
+
+   struct vk_wddm2_fence last_submission[AMD_NUM_IP_TYPES];
 
    struct vk_sync_binary_type sync_binary_type;
    const struct vk_sync_type *sync_types[3];

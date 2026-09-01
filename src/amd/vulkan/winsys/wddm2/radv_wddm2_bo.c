@@ -904,11 +904,11 @@ radv_wddm2_bo_make_resident(struct radeon_winsys *_ws, struct radeon_winsys_bo *
 }
 
 static void
-radv_wddm2_bo_destroy(struct radeon_winsys *_ws, struct radeon_winsys_bo *_bo)
+radv_wddm2_bo_destroy_now(struct radv_wddm2_winsys *ws, struct radv_wddm2_bo *bo)
 {
-   struct radv_wddm2_winsys *ws = radv_wddm2_winsys(_ws);
-   struct radv_wddm2_bo *bo = radv_wddm2_bo(_bo);
    ASSERTED NTSTATUS status;
+   struct radeon_winsys *_ws = &ws->base;
+   struct radeon_winsys_bo *_bo = &bo->base;
 
    if (all_resident && !bo->base.is_virtual) {
       D3DKMT_EVICT evict = {
@@ -951,6 +951,89 @@ radv_wddm2_bo_destroy(struct radeon_winsys *_ws, struct radeon_winsys_bo *_bo)
    //radv_wddm2_bo_va_free(ws, bo->flags, bo->base.va, bo->base.size);
 
    FREE(bo);
+}
+
+/* Destroy deferred BOs whose tagged fence has already been signaled by the GPU.
+ * Called without holding ws->deferred_mtx; takes it internally. */
+static void
+radv_wddm2_deferred_drain(struct radv_wddm2_winsys *ws)
+{
+   simple_mtx_lock(&ws->deferred_mtx);
+
+   struct radv_wddm2_deferred_bo *d, *next;
+   LIST_FOR_EACH_ENTRY_SAFE(d, next, &ws->deferred_list, list) {
+      if (p_atomic_read(d->fence.value_map) < d->fence.wait_value)
+         break;
+
+      list_del(&d->list);
+      simple_mtx_unlock(&ws->deferred_mtx);
+
+      radv_wddm2_bo_destroy_now(ws, d->bo);
+      free(d);
+
+      simple_mtx_lock(&ws->deferred_mtx);
+   }
+
+   simple_mtx_unlock(&ws->deferred_mtx);
+}
+
+static void
+radv_wddm2_bo_destroy(struct radeon_winsys *_ws, struct radeon_winsys_bo *_bo)
+{
+   struct radv_wddm2_winsys *ws = radv_wddm2_winsys(_ws);
+   struct radv_wddm2_bo *bo = radv_wddm2_bo(_bo);
+
+   radv_wddm2_deferred_drain(ws);
+
+   /* A chained IB / command buffer BO must not be torn down while a previously
+    * submitted command stream may still reference its VA via an INDIRECT_BUFFER
+    * chain, otherwise that VA can be reused and the GPU would fault executing
+    * stale content. If the GFX queue still has in-flight work, defer the real
+    * destroy until that fence retires. */
+   struct vk_wddm2_fence *last = &ws->last_submission[AMD_IP_GFX];
+   if (last->handle != 0 && p_atomic_read(last->value_map) < last->wait_value) {
+      struct radv_wddm2_deferred_bo *d = calloc(1, sizeof(*d));
+      if (d) {
+         d->bo = bo;
+         d->fence = *last;
+         simple_mtx_lock(&ws->deferred_mtx);
+         list_addtail(&d->list, &ws->deferred_list);
+         simple_mtx_unlock(&ws->deferred_mtx);
+         return;
+      }
+   }
+
+   radv_wddm2_bo_destroy_now(ws, bo);
+}
+
+/* Retire any deferred BOs whose fence has already been signaled. Called from the
+ * submit path after a new fence value is published. */
+void
+radv_wddm2_bo_deferred_drain(struct radv_wddm2_winsys *ws)
+{
+   radv_wddm2_deferred_drain(ws);
+}
+
+/* Force-destroy every pending deferred BO. Used only at winsys teardown when no
+ * GPU work can still be referencing them. */
+void
+radv_wddm2_bo_destroy_deferred_all(struct radv_wddm2_winsys *ws)
+{
+   radv_wddm2_deferred_drain(ws);
+
+   simple_mtx_lock(&ws->deferred_mtx);
+   while (!list_is_empty(&ws->deferred_list)) {
+      struct radv_wddm2_deferred_bo *d =
+         list_first_entry(&ws->deferred_list, struct radv_wddm2_deferred_bo, list);
+      list_del(&d->list);
+      simple_mtx_unlock(&ws->deferred_mtx);
+
+      radv_wddm2_bo_destroy_now(ws, d->bo);
+      free(d);
+
+      simple_mtx_lock(&ws->deferred_mtx);
+   }
+   simple_mtx_unlock(&ws->deferred_mtx);
 }
 static VkResult
 radv_wddm2_virtual_bo_map(struct radv_wddm2_winsys *ws, struct radv_wddm2_ctx *ctx,

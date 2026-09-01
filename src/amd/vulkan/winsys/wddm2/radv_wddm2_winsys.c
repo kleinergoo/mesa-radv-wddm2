@@ -617,6 +617,8 @@ radv_wddm2_winsys_destroy(struct radeon_winsys *_ws)
    status = WDDM2_DISPATCH(CloseAdapter(&close_adapter));
    assert(NT_SUCCESS(status));
 
+   radv_wddm2_bo_destroy_deferred_all(ws);
+
    radv_winsys_bo_list_destroy(&ws->global_bo_list);
    radv_winsys_bo_log_destroy(&ws->bo_log);
 
@@ -718,6 +720,8 @@ radv_wddm2_winsys_create(const struct vk_dx_adapter_info *adapter_info,
    ws->dump_ibs = !!(debug_flags & RADV_DEBUG_DUMP_IBS);
    radv_winsys_bo_list_init(&ws->global_bo_list);
    radv_winsys_bo_log_init(&ws->bo_log, debug_flags);
+   simple_mtx_init(&ws->deferred_mtx, mtx_plain);
+   list_inithead(&ws->deferred_list);
 
    D3DKMT_OPENADAPTERFROMLUID open_adapter = {
       .AdapterLuid = ws->adapter_luid,

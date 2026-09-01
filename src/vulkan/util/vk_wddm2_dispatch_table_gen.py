@@ -79,9 +79,19 @@ TEMPLATE_H = Template(COPYRIGHT + """\
  #define MAKEWORD(a,b) ((WORD)(((BYTE)(a))|(((WORD)((BYTE)(b)))<<8)))
  #endif
 
-#include <d3dkmthk.h>
-#include <stdio.h>
-#include <vulkan/vulkan_core.h>
+ #include <d3dkmthk.h>
+ #include <stdio.h>
+ #include <vulkan/vulkan_core.h>
+
+/* The Win10 SDK d3dkmthk.h shipped on this build does not provide typedefs for
+ * the hardware-context D3DKMT entry points even though the functions are
+ * exported by gdi32. Provide them so the dispatch table can reference them. */
+#ifndef PFND3DKMT_CREATEHWCONTEXT
+typedef _Check_return_ NTSTATUS (APIENTRY *PFND3DKMT_CREATEHWCONTEXT)(_Inout_ D3DKMT_CREATEHWCONTEXT*);
+#endif
+#ifndef PFND3DKMT_DESTROYHWCONTEXT
+typedef _Check_return_ NTSTATUS (APIENTRY *PFND3DKMT_DESTROYHWCONTEXT)(_In_ CONST D3DKMT_DESTROYHWCONTEXT*);
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -136,7 +146,7 @@ ${e[1]}
 </%def>
 
 % for e in entrypoints:
-static NTSTATUS
+static NTSTATUS WINAPI
 ${e[0]}_not_supported(${arg(e)})
 {
   fprintf(stderr, "D3DKMT${e[0]} is not supported\\n");
@@ -205,6 +215,8 @@ def main():
       ('DestroyPagingQueue', 'D3DDDI_DESTROYPAGINGQUEUE *arg'),
       ('CreateContextVirtual', 'D3DKMT_CREATECONTEXTVIRTUAL *arg'),
       ('DestroyContext', None),
+      ('CreateHwContext', 'D3DKMT_CREATEHWCONTEXT *arg'),
+      ('DestroyHwContext', None),
       ('CreateHwQueue', 'D3DKMT_CREATEHWQUEUE *arg'),
       ('DestroyHwQueue', None),
       ('SubmitCommand', None),

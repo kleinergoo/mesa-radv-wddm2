@@ -183,19 +183,26 @@ radv_wddm2_queue_destroy(struct radv_wddm2_queue *queue)
       WDDM2_DISPATCH(DestroySynchronizationObject(&destroy_fence));
       queue->vm_fence.handle = 0;
    }
-   if (queue->context_h) {
-      D3DKMT_DESTROYCONTEXT context_destroy = {
-         .hContext = queue->context_h,
-      };
-      WDDM2_DISPATCH(DestroyContext(&context_destroy));
-      queue->context_h = 0;
-   }
    if (queue->handle) {
       D3DKMT_DESTROYHWQUEUE queue_destroy = {
          .hHwQueue = queue->handle,
       };
       WDDM2_DISPATCH(DestroyHwQueue(&queue_destroy));
       queue->handle = 0;
+   }
+   if (queue->hw_context_h) {
+      D3DKMT_DESTROYHWCONTEXT ctx_destroy = {
+         .hHwContext = queue->hw_context_h,
+      };
+      WDDM2_DISPATCH(DestroyHwContext(&ctx_destroy));
+      queue->hw_context_h = 0;
+   }
+   if (queue->context_h) {
+      D3DKMT_DESTROYCONTEXT context_destroy = {
+         .hContext = queue->context_h,
+      };
+      WDDM2_DISPATCH(DestroyContext(&context_destroy));
+      queue->context_h = 0;
    }
 }
 
@@ -245,6 +252,38 @@ radv_wddm2_queue_init(struct radv_wddm2_winsys *ws, enum amd_ip_type hw_ip,
    queue->context_h = create_context.hContext;
 
    if (hw_ip == AMD_IP_GFX || hw_ip == AMD_IP_COMPUTE) {
+      /* Fast submission path: create a hardware context + hardware queue so we
+       * can use D3DKMT_SUBMITCOMMANDTOHWQUEUE instead of the legacy
+       * broadcast-context D3DKMT_SUBMITCOMMAND, which is ~50-260us slower per
+       * submit on this backend. If either step fails we keep queue->handle == 0
+       * and fall back to the legacy path. */
+      D3DKMT_CREATEHWCONTEXT create_hw_context = {
+         .hDevice = ws->device_h,
+         .NodeOrdinal = node,
+         .EngineAffinity = 1,
+         .PrivateDriverDataSize = sizeof(create_context_data),
+         .pPrivateDriverData = &create_context_data,
+      };
+      status = WDDM2_DISPATCH(CreateHwContext(&create_hw_context));
+      if (NT_SUCCESS(status)) {
+         queue->hw_context_h = create_hw_context.hHwContext;
+
+         D3DKMT_CREATEHWQUEUE create_hw_queue = {
+            .hHwContext = queue->hw_context_h,
+            .PrivateDriverDataSize = 0,
+            .pPrivateDriverData = NULL,
+         };
+         status = WDDM2_DISPATCH(CreateHwQueue(&create_hw_queue));
+         if (NT_SUCCESS(status)) {
+            queue->handle = create_hw_queue.hHwQueue;
+            queue->hq_progress_fence_cpu =
+               (uint64_t *)create_hw_queue.HwQueueProgressFenceCPUVirtualAddress;
+         } else {
+            WDDM2_DISPATCH(DestroyHwContext(&(D3DKMT_DESTROYHWCONTEXT){ .hHwContext = queue->hw_context_h }));
+            queue->hw_context_h = 0;
+         }
+      }
+
       D3DKMT_CREATESYNCHRONIZATIONOBJECT2 create_sync = {
          .hDevice = ws->device_h,
          .Info = {
@@ -518,7 +557,7 @@ radv_wddm2_get_cpu_addr(void *_cs, uint64_t addr, struct ac_addr_info *info)
         (((struct submit_pdd_entry *) entry)->size = sizeof(struct submit_pdd_##typ)); \
         ((struct submit_pdd_entry *) entry)->type = SUBMIT_PDD_ENTRY_##TYPE, \
         (pdd)->num_entries++, \
-        entry = NULL)
+         entry = NULL)
 
 static void
 radv_wddm2_submit_add_cs(struct radv_wddm2_ctx *ctx, struct submit_pdd_writer *pdd,
@@ -551,7 +590,6 @@ radv_wddm2_submit_add_cs(struct radv_wddm2_ctx *ctx, struct submit_pdd_writer *p
          }
       } else {
          WRITE_ENTRY(pdd, GFX_IB, gfx_ib, entry) {
-            fprintf(stderr, "Adding IB with VA 0x%" PRIx64 " and length %u bytes\n", ib.va, ib.cdw * 4);
             entry->len = ib.cdw * 4;
             entry->flags = flags;
             entry->ip_type = radv_wddm2_cs_translate_ip_type(cs->hw_ip);
@@ -652,6 +690,21 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
    struct radv_wddm2_queue *ace_queue = &ctx->ace_queue;
    NTSTATUS status;
 
+   if (ctx->ws->dump_ibs && !submit->is_gang && submit->ip_type == AMD_IP_COMPUTE)
+      fprintf(stderr, "ACE-ON-GFX: routing compute submit via GFX queue\n");
+
+   /* Standalone COMPUTE (ACE) submissions to the compute context
+    * (NodeOrdinal=2) fault the GPU on this backend, producing a GPU exception
+    * (VK_ERROR_DEVICE_LOST) on the next submit. This is hit by D3D9-via-DXVK
+    * workloads that issue compute submissions, but not by native Vulkan
+    * present paths (which only use GFX). Route non-gang compute command
+    * buffers through the GFX hw context/queue, which is verified working; this
+    * serializes the (rare, D3D9) standalone compute work on the GFX engine
+    * instead of faulting. Gang submits already submit compute via the AIB
+    * queue and are unaffected. */
+   if (!submit->is_gang && submit->ip_type == AMD_IP_COMPUTE)
+      queue = &ctx->per_ip[AMD_IP_GFX].queue;
+
    assert(queue->context_h != 0 && "Unsupported IP type");
 
    if (submit->is_gang && ace_queue->context_h == 0) {
@@ -710,11 +763,10 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
       submit_pdd_writer_finalize(&pdd);
 
       if (queue->handle) {
-         static uint32_t submit_count = 0;
-         submit_count++;
+         uint64_t submit_id = p_atomic_inc_return(&queue->hq_submit_seq);
          D3DKMT_SUBMITCOMMANDTOHWQUEUE wddm2_submit = {
             .hHwQueue = queue->handle,
-            .HwQueueProgressFenceId = submit_count,
+            .HwQueueProgressFenceId = submit_id,
             .CommandBuffer = first_ib.va,
             .CommandLength = first_ib.cdw * 4,
             .pPrivateDriverData = pdd.buffer,
@@ -781,7 +833,13 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
       ctx->per_ip[submit->ip_type].last_submission.handle = fence->handle;
       ctx->per_ip[submit->ip_type].last_submission.wait_value = signals[0].signal_value;
       ctx->per_ip[submit->ip_type].last_submission.value_map = fence->value_map;
-   }   
+
+      /* Publish the last submission fence at the winsys level so deferred BO
+       * destruction can retire once the GPU has passed this point, preventing a
+       * chained IB VA from being reused while still referenced. */
+      ctx->ws->last_submission[submit->ip_type] = ctx->per_ip[submit->ip_type].last_submission;
+      radv_wddm2_bo_deferred_drain(ctx->ws);
+   }
 
    return VK_SUCCESS;
 }

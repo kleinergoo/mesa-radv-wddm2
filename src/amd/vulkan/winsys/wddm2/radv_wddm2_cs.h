@@ -33,18 +33,16 @@
 
 #include <stdint.h>
 
-struct vk_wddm2_fence {
-   uint32_t handle;
-   uint64_t wait_value;
-   uint64_t *value_map;
-};
-
 struct radv_wddm2_queue {
    enum amd_ip_type hw_ip;
    uint32_t context_h;
+   uint32_t hw_context_h;
    uint32_t handle;
    uint32_t queue_id; /* KMD identifier */
    struct vk_wddm2_fence vm_fence;
+   /* Hardware queue progress fence (fast submission path). */
+   uint64_t *hq_progress_fence_cpu;
+   uint64_t hq_submit_seq;
 };
 
 struct radv_wddm2_ctx {
