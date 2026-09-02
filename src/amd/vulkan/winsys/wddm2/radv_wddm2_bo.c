@@ -924,28 +924,53 @@ radv_wddm2_bo_destroy_now(struct radv_wddm2_winsys *ws, struct radv_wddm2_bo *bo
    FREE(bo);
 }
 
-/* Destroy deferred BOs whose tagged fence has already been signaled by the GPU.
- * Called without holding ws->deferred_mtx; takes it internally. */
 static void
-radv_wddm2_deferred_drain(struct radv_wddm2_winsys *ws)
+radv_wddm2_deferred_dispose(struct radv_wddm2_winsys *ws, struct list_head *done)
+{
+   struct radv_wddm2_deferred_bo *d, *next;
+
+   /* The slow D3DKMT destroy and VA free are performed outside the mutex.
+    * The nodes have already been detached from the live list, so no other
+    * drainer can observe or dispose them again: handing ownership to `done`
+    * makes the drain atomic with respect to concurrent drainers. */
+   LIST_FOR_EACH_ENTRY_SAFE(d, next, done, list) {
+      radv_wddm2_bo_destroy_now(ws, d->bo);
+      free(d);
+   }
+}
+
+/* Atomically splice the already-retired deferred BOs onto `done` so they can
+ * be destroyed outside the mutex without racing concurrent drainers.
+ * `force` ignores the fence and retires every pending BO (winsys teardown). */
+static void
+radv_wddm2_deferred_collect(struct radv_wddm2_winsys *ws, struct list_head *done,
+                            bool force)
 {
    simple_mtx_lock(&ws->deferred_mtx);
 
    struct radv_wddm2_deferred_bo *d, *next;
    LIST_FOR_EACH_ENTRY_SAFE(d, next, &ws->deferred_list, list) {
-      if (p_atomic_read(d->fence.value_map) < d->fence.wait_value)
+      if (!force && p_atomic_read(d->fence.value_map) < d->fence.wait_value)
          break;
 
       list_del(&d->list);
-      simple_mtx_unlock(&ws->deferred_mtx);
-
-      radv_wddm2_bo_destroy_now(ws, d->bo);
-      free(d);
-
-      simple_mtx_lock(&ws->deferred_mtx);
+      list_addtail(&d->list, done);
    }
 
    simple_mtx_unlock(&ws->deferred_mtx);
+
+   radv_wddm2_deferred_dispose(ws, done);
+}
+
+/* Destroy deferred BOs whose tagged fence has already been signaled by the GPU.
+ * Called without holding ws->deferred_mtx; takes it internally. */
+static void
+radv_wddm2_deferred_drain(struct radv_wddm2_winsys *ws)
+{
+   struct list_head done;
+   list_inithead(&done);
+
+   radv_wddm2_deferred_collect(ws, &done, false);
 }
 
 static void
@@ -964,17 +989,36 @@ radv_wddm2_bo_destroy(struct radeon_winsys *_ws, struct radeon_winsys_bo *_bo)
    for (unsigned ip = 0; ip < AMD_NUM_IP_TYPES; ip++) {
       struct vk_wddm2_fence *last = &ws->last_submission[ip];
       if (last->handle != 0 && p_atomic_read(last->value_map) < last->wait_value) {
+         /* A BO must only ever be deferred once. If it is already pending in the
+          * deferred list, another (app-level) destroy raced us; do not enqueue a
+          * second node or the drain would free the same BO twice. */
          struct radv_wddm2_deferred_bo *d = calloc(1, sizeof(*d));
-         if (d) {
-            d->bo = bo;
-            d->fence = *last;
-            simple_mtx_lock(&ws->deferred_mtx);
-            list_addtail(&d->list, &ws->deferred_list);
-            simple_mtx_unlock(&ws->deferred_mtx);
-            return;
-         } else {
+         if (!d) {
             fprintf(stderr, "radv/wddm2: out of memory allocating deferred BO\n");
+            continue;
          }
+
+         d->bo = bo;
+         d->fence = *last;
+
+         simple_mtx_lock(&ws->deferred_mtx);
+         struct radv_wddm2_deferred_bo *already = NULL, *tmp;
+         LIST_FOR_EACH_ENTRY(tmp, &ws->deferred_list, list) {
+            if (tmp->bo == bo) {
+               already = tmp;
+               break;
+            }
+         }
+
+         if (already) {
+            simple_mtx_unlock(&ws->deferred_mtx);
+            free(d);
+            return;
+         }
+
+         list_addtail(&d->list, &ws->deferred_list);
+         simple_mtx_unlock(&ws->deferred_mtx);
+         return;
       }
    }
 
@@ -994,21 +1038,10 @@ radv_wddm2_bo_deferred_drain(struct radv_wddm2_winsys *ws)
 void
 radv_wddm2_bo_destroy_deferred_all(struct radv_wddm2_winsys *ws)
 {
-   radv_wddm2_deferred_drain(ws);
+   struct list_head done;
+   list_inithead(&done);
 
-   simple_mtx_lock(&ws->deferred_mtx);
-   while (!list_is_empty(&ws->deferred_list)) {
-      struct radv_wddm2_deferred_bo *d =
-         list_first_entry(&ws->deferred_list, struct radv_wddm2_deferred_bo, list);
-      list_del(&d->list);
-      simple_mtx_unlock(&ws->deferred_mtx);
-
-      radv_wddm2_bo_destroy_now(ws, d->bo);
-      free(d);
-
-      simple_mtx_lock(&ws->deferred_mtx);
-   }
-   simple_mtx_unlock(&ws->deferred_mtx);
+   radv_wddm2_deferred_collect(ws, &done, true);
 }
 static VkResult
 radv_wddm2_virtual_bo_map(struct radv_wddm2_winsys *ws, struct radv_wddm2_ctx *ctx,
