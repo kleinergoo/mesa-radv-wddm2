@@ -26,6 +26,8 @@
 #ifdef WIN32
 #include <windows.h>
 #endif
+#include <stdbool.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -34,6 +36,48 @@
 #include "vk_alloc.h"
 #include "vk_device.h"
 #include "vk_util.h"
+
+#ifdef WIN32
+/* Non-faulting validation of a client-supplied VkBuffer handle.
+ *
+ * The common buffer entrypoints can be reached (by an app's middleware, e.g.
+ * NRI) with a stale or device-address-alias VkBuffer handle under RADV-WDDM2
+ * + emulate_rt.  Dereferencing such a handle directly faults.  Probe it with
+ * VirtualQuery (which never faults on a bad pointer) and only accept a readable
+ * committed page whose object type is VK_OBJECT_TYPE_BUFFER.
+ */
+static bool
+vk_buffer_handle_valid(VkBuffer handle)
+{
+   const struct vk_object_base *base = (const struct vk_object_base *)(uintptr_t)handle;
+   MEMORY_BASIC_INFORMATION mbi;
+
+   if (base == NULL || VirtualQuery(base, &mbi, sizeof(mbi)) != sizeof(mbi) || mbi.State != MEM_COMMIT)
+      return false;
+
+   const DWORD ro = PAGE_READONLY | PAGE_READWRITE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE |
+                    PAGE_WRITECOPY | PAGE_EXECUTE_WRITECOPY;
+
+   if ((mbi.Protect & ro) == 0)
+      return false;
+
+   if (mbi.RegionSize < offsetof(struct vk_object_base, type) + sizeof(base->type))
+      return false;
+
+   return base->type == VK_OBJECT_TYPE_BUFFER;
+}
+
+static void
+vk_buffer_handle_warn(const char *fn, VkDevice device, VkBuffer handle)
+{
+   static int warn = -1;
+   if (warn < 0)
+      warn = getenv("RADV_TRACE_GBMR2") ? 1 : 0;
+   if (warn)
+      fprintf(stderr, "RADV GBMR2: %s: invalid VkBuffer handle %p (device=%p thread=%08lx)\n",
+              fn, (void *)handle, (void *)device, (unsigned long)GetCurrentThreadId());
+}
+#endif
 
 void
 vk_buffer_init(struct vk_device *device,
@@ -132,46 +176,13 @@ vk_common_GetBufferMemoryRequirements2(VkDevice _device,
    struct vk_buffer *buffer;
 
 #ifdef WIN32
-   /* Defensive guard: the public GetBufferMemoryRequirements2 entrypoint may be
-     * called (by the app's middleware) with a stale / device-address-alias VkBuffer
-     * handle.  Dereferencing such a handle directly faults (observed on RADV-WDDM2
-     * under DOOM: The Dark Ages with emulate_rt).  Probe the handle with
-     * VirtualQuery (which never faults on a bad pointer) and only dereference it
-     * when it is a readable committed user page of the correct object type;
-     * otherwise log and return zeroed requirements instead of crashing.
-     */
-   {
-      const struct vk_object_base *base = (const struct vk_object_base *)(uintptr_t)pInfo->buffer;
-      MEMORY_BASIC_INFORMATION mbi;
-      int valid = 0;
-
-      if (base != NULL &&
-          VirtualQuery(base, &mbi, sizeof(mbi)) == sizeof(mbi) && mbi.State == MEM_COMMIT &&
-          (mbi.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE |
-                          PAGE_WRITECOPY | PAGE_EXECUTE_WRITECOPY)) != 0 &&
-          mbi.RegionSize >= offsetof(struct vk_object_base, type) + sizeof(base->type) &&
-          base->type == VK_OBJECT_TYPE_BUFFER)
-         valid = 1;
-
-      if (!valid) {
-         static int warn = -1;
-         if (warn < 0)
-            warn = getenv("RADV_TRACE_GBMR2") ? 1 : 0;
-         if (warn)
-            fprintf(stderr,
-                    "RADV GBMR2: rejecting invalid VkBuffer handle %p "
-                    "(device=%p thread=%08lx region=%p sz=0x%zx state=0x%lx prot=0x%lx)\n",
-                    (void *)pInfo->buffer, (void *)_device, (unsigned long)GetCurrentThreadId(),
-                    mbi.BaseAddress, (size_t)mbi.RegionSize, (unsigned long)mbi.State,
-                    (unsigned long)mbi.Protect);
-
-         memset(pMemoryRequirements, 0, sizeof(*pMemoryRequirements));
-         pMemoryRequirements->sType = VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2;
-         return;
-      }
-
-      buffer = (struct vk_buffer *)base;
+   if (!vk_buffer_handle_valid(pInfo->buffer)) {
+      vk_buffer_handle_warn("GetBufferMemoryRequirements2", _device, pInfo->buffer);
+      memset(pMemoryRequirements, 0, sizeof(*pMemoryRequirements));
+      pMemoryRequirements->sType = VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2;
+      return;
    }
+   buffer = (struct vk_buffer *)(uintptr_t)pInfo->buffer;
 #else
    buffer = vk_buffer_from_handle(pInfo->buffer);
 #endif
@@ -222,7 +233,12 @@ VKAPI_ATTR VkDeviceAddress VKAPI_CALL
 vk_common_GetBufferDeviceAddress(UNUSED VkDevice device,
                                  const VkBufferDeviceAddressInfo *pInfo)
 {
+#ifdef WIN32
+   if (!vk_buffer_handle_valid(pInfo->buffer)) {
+      vk_buffer_handle_warn("GetBufferDeviceAddress", (VkDevice)device, pInfo->buffer);
+      return 0;
+   }
+#endif
    VK_FROM_HANDLE(vk_buffer, buffer, pInfo->buffer);
-
    return buffer->device_address;
 }
