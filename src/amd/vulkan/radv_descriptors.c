@@ -16,6 +16,47 @@
 static_assert(RADV_SAMPLER_DESC_SIZE == 16 && RADV_BUFFER_DESC_SIZE == 16 && RADV_ACCEL_STRUCT_DESC_SIZE == 16,
               "Sampler/buffer/acceleration structure descriptor sizes must match.");
 
+#ifdef WIN32
+#include <windows.h>
+#include <stdbool.h>
+#include <stdio.h>
+
+/* The outgoing descriptor destination for vkGetDescriptorEXT (VK_EXT_descriptor_buffer)
+ * is a raw host pointer supplied by the client.  Under DOOM: The Dark Ages + NRI with
+ * emulate_rt that pointer can be NULL / garbage, turning the descriptor write into a
+ * write-AV (observed MOVDQU [base+0x30] with base==0).  Validate the destination is a
+ * writable committed page with VirtualQuery (non-faulting) before the switch writes it;
+ * otherwise log and return the descriptor unwritten instead of crashing.
+ */
+static bool
+radv_descriptor_dst_valid(void *dst, size_t size)
+{
+   MEMORY_BASIC_INFORMATION mbi;
+
+   if (dst == NULL || VirtualQuery(dst, &mbi, sizeof(mbi)) != sizeof(mbi) || mbi.State != MEM_COMMIT)
+      return false;
+
+   if ((mbi.Protect & (PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) == 0)
+      return false;
+
+   if ((uintptr_t)dst - (uintptr_t)mbi.BaseAddress + size > mbi.RegionSize)
+      return false;
+
+   return true;
+}
+
+static void
+radv_descriptor_dst_warn(VkDevice device, void *dst)
+{
+   static int warn = -1;
+   if (warn < 0)
+      warn = getenv("RADV_TRACE_GBMR2") ? 1 : 0;
+   if (warn)
+      fprintf(stderr, "RADV GBMR2: GetDescriptorEXT: invalid descriptor destination %p (device=%p thread=%08lx)\n",
+              dst, (void *)device, (unsigned long)GetCurrentThreadId());
+}
+#endif
+
 uint32_t
 radv_descriptor_alignment(VkDescriptorType type)
 {
@@ -103,6 +144,13 @@ radv_GetDescriptorEXT(VkDevice _device, const VkDescriptorGetInfoEXT *pDescripto
 {
    VK_FROM_HANDLE(radv_device, device, _device);
    const struct radv_physical_device *pdev = radv_device_physical(device);
+
+#ifdef WIN32
+   if (!radv_descriptor_dst_valid(pDescriptor, dataSize)) {
+      radv_descriptor_dst_warn(_device, pDescriptor);
+      return;
+   }
+#endif
 
    switch (pDescriptorInfo->type) {
    case VK_DESCRIPTOR_TYPE_SAMPLER: {
