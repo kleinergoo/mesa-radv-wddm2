@@ -210,11 +210,16 @@ enum alloc_heap {
 
 static void
 fill_alloc_heaps(struct radv_wddm2_winsys *ws, enum radeon_bo_domain initial_domain, enum radeon_bo_flag flags,
-                 bool host_allocated, struct alloc_bo_info *bo_info)
+                 bool host_allocated, bool gtt_spill, struct alloc_bo_info *bo_info)
 {
    uint32_t heap_count = 0;
 
-   if (initial_domain & RADEON_DOMAIN_VRAM) {
+   /* When gtt_spill is set the VRAM heaps would exceed the WDDM residency
+    * budget; back the allocation with GART (system memory) instead so the
+    * application does not hard-fail with OUT_OF_DEVICE_MEMORY.  The BO's
+    * logical domain stays VRAM; only the physical backing changes.
+    */
+   if (!gtt_spill && (initial_domain & RADEON_DOMAIN_VRAM)) {
       assert(!host_allocated);
       if (!(flags & RADEON_FLAG_CPU_ACCESS))
          ADD_HEAP(INVISIBLE);
@@ -222,7 +227,7 @@ fill_alloc_heaps(struct radv_wddm2_winsys *ws, enum radeon_bo_domain initial_dom
          ADD_HEAP(LOCAL);
    }
 
-   if (initial_domain & RADEON_DOMAIN_GTT || initial_domain == 0) {
+   if (gtt_spill || (initial_domain & RADEON_DOMAIN_GTT) || initial_domain == 0) {
       if (!(flags & RADEON_FLAG_GTT_WC))
          ADD_HEAP(GART_CACHEABLE);
       if (!host_allocated)
@@ -247,7 +252,8 @@ fill_alloc_heaps(struct radv_wddm2_winsys *ws, enum radeon_bo_domain initial_dom
 static uint32_t
 fill_alloc_pdata(struct radv_wddm2_winsys *ws, uint64_t size, unsigned alignment,
                  enum radeon_bo_domain initial_domain, enum radeon_bo_flag flags,
-                 unsigned priority, uint64_t address, void *cpu_ptr, uint8_t *pdata)
+                 unsigned priority, uint64_t address, void *cpu_ptr, bool gtt_spill,
+                 uint8_t *pdata)
 {
    struct alloc_header *header = (struct alloc_header *)pdata;
    struct alloc_entry *entry;
@@ -276,7 +282,7 @@ fill_alloc_pdata(struct radv_wddm2_winsys *ws, uint64_t size, unsigned alignment
    entry->bo_info.va_size = size;
    entry->bo_info.va_addr = address;
    entry->bo_info.flags2 = 0x1000000;
-   fill_alloc_heaps(ws, initial_domain, flags, cpu_ptr != NULL, &entry->bo_info);
+   fill_alloc_heaps(ws, initial_domain, flags, cpu_ptr != NULL, gtt_spill, &entry->bo_info);
 
    if (!(flags & RADEON_FLAG_NO_INTERPROCESS_SHARING)) {
       entry->num_planes = 1;
@@ -452,10 +458,20 @@ radv_wddm2_bo_create_internal(struct radeon_winsys *_ws, uint64_t size, unsigned
       virt_alignment = MAX2(virt_alignment, ws->gpu_info.pte_fragment_size);
    const uint64_t phys_size = align64(size, phys_alignment);
 
+   /* Out-of-VRAM spill support: if the KMD cannot place a VRAM allocation within
+    * the device-local residency budget (DOOM: The Dark Ages + emulate_rt on the
+    * 8GB RX 580), retry the allocation backed by GART (system memory) so the
+    * application gets an OUT_OF_DEVICE_MEMORY-free allocation instead of crashing.
+    */
+   bool gtt_spill = false;
+   bool want_vram = (initial_domain & RADEON_DOMAIN_VRAM) != 0;
+
+retry_alloc:
+   {
    uint8_t alloc_pdata[824] = {0};
    uint32_t pdata_size;
    pdata_size = fill_alloc_pdata(ws, phys_size, phys_alignment, initial_domain,
-                                 flags, priority, address, cpu_ptr, alloc_pdata);
+                                 flags, priority, address, cpu_ptr, gtt_spill, alloc_pdata);
 
    D3DDDI_ALLOCATIONINFO2 alloc_info = {
       .pSystemMem = cpu_ptr,
@@ -488,6 +504,11 @@ radv_wddm2_bo_create_internal(struct radeon_winsys *_ws, uint64_t size, unsigned
 
    status = WDDM2_DISPATCH(CreateAllocation2(&create));
    if (!NT_SUCCESS(status)) {
+      if (want_vram && !gtt_spill) {
+         fprintf(stderr, "CreateAllocation2 failed 0x%X (VRAM), spilling to GTT\n", status);
+         gtt_spill = true;
+         goto retry_alloc;
+      }
       fprintf(stderr, "CreateAllocation2 failed 0x%X\n", status);
       result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
       goto error_ptr_alloc;
@@ -541,6 +562,12 @@ radv_wddm2_bo_create_internal(struct radeon_winsys *_ws, uint64_t size, unsigned
       };
       status = WDDM2_DISPATCH(MakeResident(&make_resident));
       if (!NT_SUCCESS(status)) {
+         if (want_vram && !gtt_spill) {
+            fprintf(stderr, "MakeResident failed (VRAM), spilling to GTT\n");
+            WDDM2_DISPATCH(DestroyAllocation2(&destroy));
+            gtt_spill = true;
+            goto retry_alloc;
+         }
          fprintf(stderr, "MakeResident failed\n");
          result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
          goto error_va_alloc;
@@ -577,6 +604,9 @@ error_va_alloc:
 error_ptr_alloc:
    FREE(bo);
    return result;
+   }
+
+   assert(0); /* unreachable */
 }
 
 static VkResult
