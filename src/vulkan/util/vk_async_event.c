@@ -62,13 +62,20 @@ vk_async_event_wait(HANDLE event, uint64_t rel_timeout_ns)
 {
    /* Both poll() and WaitForSingleObject() take a relative timeout in
     * milliseconds as a 32-bit number.  For poll(), it's signed.
+    *
+    * UINT64_MAX is used by callers as an unbounded wait.  DIV_ROUND_UP()
+    * would overflow for such a value (wrapping the timeout to 0 ms), and
+    * would also overflow for any value near UINT64_MAX, so clamp the input
+    * before rounding and translate the sentinel into an unbounded wait.
     */
-   uint64_t rel_timeout_ms = DIV_ROUND_UP(rel_timeout_ns, 1000 * 1000);
-   if (rel_timeout_ms > INT32_MAX)
-      rel_timeout_ms = INT32_MAX;
+   int32_t timeout_ms;
+   if (rel_timeout_ns == UINT64_MAX)
+      timeout_ms = -1;
+   else
+      timeout_ms = (int32_t)MIN2(DIV_ROUND_UP(MIN2(rel_timeout_ns, INT64_MAX), 1000 * 1000), INT32_MAX);
 
 #ifdef _WIN32
-   DWORD ret = WaitForSingleObject(event, rel_timeout_ms);
+   DWORD ret = WaitForSingleObject(event, timeout_ms == -1 ? INFINITE : (DWORD)timeout_ms);
    if (unlikely(debug_get_bool_option("RADV_WDDM2_ASYNC_EVENT_DEBUG", false)))
       fprintf(stderr, "WaitForSingleObject: 0x%X\n", ret);
    switch (ret) {
@@ -84,7 +91,8 @@ vk_async_event_wait(HANDLE event, uint64_t rel_timeout_ns)
       .fd = (intptr_t)event,
       .events = POLLIN,
    };
-   int ret = poll(&event_poll, 1, rel_timeout_ms);
+   /* A negative timeout to poll() means wait indefinitely. */
+   int ret = poll(&event_poll, 1, timeout_ms);
    if (ret < 0 && (errno == EINTR || errno == EAGAIN)) {
       /* Treat this as an early timeout.  The caller loops anyway */
       return VK_TIMEOUT;

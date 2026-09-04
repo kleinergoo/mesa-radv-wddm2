@@ -1291,19 +1291,24 @@ radv_create_cmd_buffer(struct vk_command_pool *pool, VkCommandBufferLevel level,
       list_inithead(&cmd_buffer->upload.list);
 
       radv_cmd_buffer_init_shader_part_cache(device, cmd_buffer);
-      result =
-         radv_create_cmd_stream(device, ip, cmd_buffer->vk.level == VK_COMMAND_BUFFER_LEVEL_SECONDARY, &cmd_buffer->cs);
-      if (result != VK_SUCCESS) {
-         radv_destroy_cmd_buffer(&cmd_buffer->vk);
-         return vk_error(device, VK_ERROR_OUT_OF_DEVICE_MEMORY);
-      }
 
+      /* Initialize all state that radv_destroy_cmd_buffer() tears down before
+       * calling radv_create_cmd_stream(), which is fallible, so that its error
+       * path never operates on members that were not set up yet.
+       */
       for (unsigned i = 0; i < MAX_BIND_POINTS; i++)
          vk_object_base_init(&device->vk, &cmd_buffer->descriptors[i].push_set.set.base, VK_OBJECT_TYPE_DESCRIPTOR_SET);
 
       cmd_buffer->accel_struct_buffers = _mesa_pointer_set_create(NULL);
       cmd_buffer->ray_history = UTIL_DYNARRAY_INIT;
       list_inithead(&cmd_buffer->msrtss_transients);
+
+      result =
+         radv_create_cmd_stream(device, ip, cmd_buffer->vk.level == VK_COMMAND_BUFFER_LEVEL_SECONDARY, &cmd_buffer->cs);
+      if (result != VK_SUCCESS) {
+         radv_destroy_cmd_buffer(&cmd_buffer->vk);
+         return vk_error(device, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+      }
    }
 
    if (device->utrace.context) {
