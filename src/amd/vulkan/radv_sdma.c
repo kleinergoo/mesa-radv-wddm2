@@ -15,6 +15,8 @@
 
 #include "ac_cmdbuf_sdma.h"
 
+#include <stdlib.h>
+
 struct radv_sdma_chunked_copy_info {
    unsigned extent_horizontal_blocks;
    unsigned extent_vertical_blocks;
@@ -204,6 +206,13 @@ radv_sdma_get_surf(struct radv_cmd_buffer *cmd_buffer, const struct radv_image *
    if (pdev->info.gfx_level >= GFX12)
       info.is_compressed = binding->bo && binding->bo->gfx12_allow_dcc;
 
+   if (getenv("RADV_WDDM2_SDMA_DBG"))
+      fprintf(stderr, "SDMAsurf va=0x%" PRIx64 " lin=%d pitch=%u slice=%u bpp=%u mip=%u layer=%u ext=%ux%ux%u surf_off64=0x%" PRIx64 "\n",
+              info.va, (int)surf->is_linear, info.pitch, info.slice_pitch, info.bpp, info.first_level,
+              subresource.baseArrayLayer, img_extent_el.width, img_extent_el.height,
+              (uint32_t)info.extent.depth,
+              (uint64_t)(surf->is_linear ? surf->u.gfx9.offset[subresource.mipLevel] : surf->u.gfx9.surf_offset));
+
    return info;
 }
 
@@ -288,11 +297,17 @@ radv_sdma_copy_buffer_image(const struct radv_device *device, struct radv_cmd_st
                             bool to_image)
 {
    if (img->surf->is_linear) {
+      if (getenv("RADV_WDDM2_SDMA_DBG"))
+         fprintf(stderr, "SDMAcopy-1D to_img=%d buf_va=0x%" PRIx64 " img_va=0x%" PRIx64 " pitch=%u/%u ext=%ux%u\n",
+                 (int)to_image, buf->va, img->va, buf->pitch, img->pitch, extent.width, extent.height);
       if (to_image)
          radv_sdma_emit_copy_linear_sub_window(device, cs, buf, img, extent);
       else
          radv_sdma_emit_copy_linear_sub_window(device, cs, img, buf, extent);
    } else {
+      if (getenv("RADV_WDDM2_SDMA_DBG"))
+         fprintf(stderr, "SDMAcopy-tiled to_img=%d buf_va=0x%" PRIx64 " img_va=0x%" PRIx64 " pix_pitch=%u buf_pitch=%u ext=%ux%u\n",
+                 (int)to_image, buf->va, img->va, img->pitch, buf->pitch, extent.width, extent.height);
       radv_sdma_emit_copy_tiled_sub_window(device, cs, img, buf, extent, !to_image);
    }
 }

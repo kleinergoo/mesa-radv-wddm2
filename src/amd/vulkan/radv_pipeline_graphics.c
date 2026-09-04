@@ -17,6 +17,19 @@
 #include "util/mesa-blake3.h"
 #include "util/os_time.h"
 #include "util/u_atomic.h"
+
+/* Local debug instrumentation toggle (Windows port only). Set RADV_WDDM2_DEBUG
+ * to 0 below (or pass -DRADV_WDDM2_DEBUG=0) to strip the RADV_WDDM2_DBG prints
+ * from this file. Runtime gating is via the RADV_WDDM2_DBG environment variable.
+ */
+#ifndef RADV_WDDM2_DEBUG
+#define RADV_WDDM2_DEBUG 1
+#endif
+#if RADV_WDDM2_DEBUG
+#include <stdlib.h>
+#include <stdio.h>
+#endif
+
 #include "radv_device.h"
 #include "radv_entrypoints.h"
 #include "radv_formats.h"
@@ -370,6 +383,15 @@ radv_pipeline_needed_dynamic_state(const struct radv_device *device, const struc
       !state->rs->rasterizer_discard_enable || (pipeline->dynamic_states & RADV_DYNAMIC_RASTERIZER_DISCARD_ENABLE);
    uint64_t states = RADV_DYNAMIC_ALL;
 
+#if RADV_WDDM2_DEBUG
+   if (getenv("RADV_WDDM2_DBG"))
+      fprintf(stderr,
+              "radv: RAW all=%llx vpwc=%llx scwc=%llx vp=%llx literal50=%llx vp_state=%p\n",
+              (unsigned long long)RADV_DYNAMIC_ALL, (unsigned long long)RADV_DYNAMIC_VIEWPORT_WITH_COUNT,
+              (unsigned long long)RADV_DYNAMIC_SCISSOR_WITH_COUNT, (unsigned long long)RADV_DYNAMIC_VIEWPORT,
+              (unsigned long long)(1ull << 50), (void *)state->vp);
+#endif
+
    if (pdev->info.gfx_level < GFX10_3)
       states &= ~RADV_DYNAMIC_FRAGMENT_SHADING_RATE;
 
@@ -425,6 +447,12 @@ radv_pipeline_needed_dynamic_state(const struct radv_device *device, const struc
 
    if (pipeline->dynamic_states & RADV_DYNAMIC_VERTEX_INPUT)
       states &= ~RADV_DYNAMIC_VERTEX_INPUT_BINDING_STRIDE;
+
+#if RADV_WDDM2_DEBUG
+   if (getenv("RADV_WDDM2_DBG"))
+      fprintf(stderr, "radv: NEEDED_RET states=0x%llx vpwc=%d scwc=%d\n", (unsigned long long)states,
+              !!(states & RADV_DYNAMIC_VIEWPORT_WITH_COUNT), !!(states & RADV_DYNAMIC_SCISSOR_WITH_COUNT));
+#endif
 
    return states;
 }
@@ -1116,6 +1144,18 @@ radv_pipeline_init_dynamic_state(const struct radv_device *device, struct radv_g
    dynamic->vk.ial.stencil_att = state->ial ? state->ial->stencil_att : MESA_VK_ATTACHMENT_UNUSED;
 
    pipeline->dynamic_state.mask = states;
+
+#if RADV_WDDM2_DEBUG
+   if (getenv("RADV_WDDM2_DBG"))
+      fprintf(stderr,
+              "radv: pipe_init mask=0x%llx needed=0x%llx app_dyn=0x%llx vp_bit=%d vpwc_bit=%d vp_count=%u "
+              "vp_in_mask=%d stvp_count=%u\n",
+              (unsigned long long)states, (unsigned long long)needed_states,
+              (unsigned long long)pipeline->dynamic_states, !!(states & RADV_DYNAMIC_VIEWPORT),
+              !!(states & RADV_DYNAMIC_VIEWPORT_WITH_COUNT), dynamic->vk.vp.viewport_count,
+              !!(pipeline->dynamic_state.mask & RADV_DYNAMIC_VIEWPORT),
+              state->vp ? state->vp->viewport_count : 999);
+#endif
 }
 
 struct radv_shader *

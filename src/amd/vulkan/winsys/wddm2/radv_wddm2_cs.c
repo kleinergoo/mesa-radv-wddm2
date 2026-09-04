@@ -585,11 +585,18 @@ radv_wddm2_submit_add_cs(struct radv_wddm2_ctx *ctx, struct submit_pdd_writer *p
    else if (type == RADV_CS_DUMP_TYPE_POSTAMBLE_IBS)
       flags = 0x104;
 
+   if (getenv("RADV_WDDM2_DUMP_MAIN") && type == RADV_CS_DUMP_TYPE_MAIN_IBS)
+      ctx->ws->base.cs_dump(&cs->base, stderr, NULL, 0, type);
+
    if (ctx->ws->dump_ibs)
       ctx->ws->base.cs_dump(&cs->base, stderr, NULL, 0, type);
 
-   for  (unsigned i = 0; i < num_ib_buffers; i++) {
+for (unsigned i = 0; i < num_ib_buffers; i++) {
       struct radv_winsys_ib ib = cs->ib_buffers[i];
+
+      if (ctx->ws->dump_ibs)
+         fprintf(stderr, "RADV_WDDM2_DBG   ib[%u] va=0x%llx cdw=%u hw_ip=%u\n", i,
+                 (unsigned long long)ib.va, ib.cdw, cs->hw_ip);
 
       if (first->va == 0)
          *first = ib;
@@ -702,6 +709,12 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
    struct radv_wddm2_queue *queue = &ctx->per_ip[submit->ip_type].queue;
    struct radv_wddm2_queue *ace_queue = &ctx->ace_queue;
    NTSTATUS status;
+
+   if (getenv("RADV_WDDM2_DBG"))
+      fprintf(stderr, "RADV_WDDM2_DBG submit ip=%u gang=%d cs=%u dump_ibs=%d hwqueue=%llu ctx=%llu\n",
+              submit->ip_type, submit->is_gang ? 1 : 0, submit->cs_count,
+              ctx->ws->dump_ibs ? 1 : 0, (unsigned long long)queue->handle,
+              (unsigned long long)queue->context_h);
 
    if (ctx->ws->dump_ibs && !ctx->ws->has_dedicated_compute_node &&
        !submit->is_gang && submit->ip_type == AMD_IP_COMPUTE)

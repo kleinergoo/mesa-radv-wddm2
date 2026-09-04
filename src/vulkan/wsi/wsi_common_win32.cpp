@@ -823,6 +823,22 @@ wsi_win32_queue_present(struct wsi_swapchain *drv_chain,
    char *ptr = (char *)image->base.cpu_map;
    char *dptr = (char *)image->sw.ppvBits;
 
+   if (getenv("RADV_WSI_DEBUG")) {
+      unsigned nz = 0;
+      const uint8_t *src = (const uint8_t *)ptr;
+      for (unsigned yy = 0; yy < chain->extent.height; yy += 8) {
+         const uint8_t *row = src + (size_t)yy * image->base.row_pitches[0];
+         for (unsigned xx = 0; xx < chain->extent.width; xx += 8) {
+            const uint32_t *px = (const uint32_t *)(row + (size_t)xx * 4);
+            if (*px != 0)
+               nz++;
+         }
+      }
+      fprintf(stderr, "W32P present cpu idx=%u nz=%u src0=0x%08X pitch=%lu\n",
+              image_index, nz, *(const uint32_t *)ptr,
+              (unsigned long)image->base.row_pitches[0]);
+   }
+
    for (unsigned h = 0; h < chain->extent.height; h++) {
       memcpy(dptr, ptr, chain->extent.width * 4);
       dptr += image->sw.bmp_row_pitch;
@@ -962,6 +978,12 @@ wsi_win32_surface_create_swapchain(
    bool supports_dxgi = wsi->dxgi.factory &&
                         wsi->dxgi.dcomp &&
                         wsi->wsi->win32.get_d3d12_command_queue;
+   if (getenv("RADV_WSI_DEBUG"))
+      fprintf(stderr, "W32SC supports_dxgi=%d type=%d count=%u extent=%ux%u present=%u\n",
+              supports_dxgi, (int)(supports_dxgi ? WSI_IMAGE_TYPE_DXGI : WSI_IMAGE_TYPE_CPU),
+              create_info->minImageCount, create_info->imageExtent.width,
+              create_info->imageExtent.height, (unsigned)create_info->presentMode);
+
    struct wsi_base_image_params *image_params = supports_dxgi ?
       &dxgi_image_params.base : &cpu_image_params.base;
 

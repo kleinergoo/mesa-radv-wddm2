@@ -28,6 +28,18 @@
 #include "radv_shader_object.h"
 #include "radv_tracepoints.h"
 #include "sid.h"
+
+/* Local debug instrumentation toggle (Windows port only). Set RADV_WDDM2_DEBUG
+ * to 0 below (or pass -DRADV_WDDM2_DEBUG=0) to strip the RADV_WDDM2_DBG prints
+ * from this file. Runtime gating is via the RADV_WDDM2_DBG environment variable.
+ */
+#ifndef RADV_WDDM2_DEBUG
+#define RADV_WDDM2_DEBUG 1
+#endif
+#if RADV_WDDM2_DEBUG
+#include <stdlib.h>
+#endif
+
 #include "vk_command_pool.h"
 #include "vk_enum_defines.h"
 #include "vk_format.h"
@@ -773,10 +785,27 @@ radv_bind_dynamic_state(struct radv_cmd_buffer *cmd_buffer, const struct radv_dy
    /* Special case for setting the number of rectangles from the pipeline. */
    dest->vk.dr.rectangle_count = src->vk.dr.rectangle_count;
 
+   if (RADV_WDDM2_DEBUG)
+      if (getenv("RADV_WDDM2_DBG"))
+         fprintf(stderr, "radv: bind_dyn mask=0x%llx vp_bit=%d vpwc_bit=%d count=%u\n",
+                 (unsigned long long)copy_mask, !!(copy_mask & RADV_DYNAMIC_VIEWPORT),
+                 !!(copy_mask & RADV_DYNAMIC_VIEWPORT_WITH_COUNT), src->vk.vp.viewport_count);
+
    if (copy_mask & RADV_DYNAMIC_VIEWPORT) {
       if (memcmp(&dest->vk.vp.viewports, &src->vk.vp.viewports, src->vk.vp.viewport_count * sizeof(VkViewport))) {
+         if (RADV_WDDM2_DEBUG)
+            if (getenv("RADV_WDDM2_DBG"))
+               fprintf(stderr, "radv: bind_dyn viewport copy, count=%u\n", src->vk.vp.viewport_count);
          radv_cmd_set_viewport(cmd_buffer, 0, src->vk.vp.viewport_count, src->vk.vp.viewports, src->vp_xform);
+      } else {
+         if (RADV_WDDM2_DEBUG)
+            if (getenv("RADV_WDDM2_DBG"))
+               fprintf(stderr, "radv: bind_dyn viewport NOCOPY (equal), count=%u\n", src->vk.vp.viewport_count);
       }
+   } else {
+      if (RADV_WDDM2_DEBUG)
+         if (getenv("RADV_WDDM2_DBG"))
+            fprintf(stderr, "radv: bind_dyn viewport NOT IN MASK\n");
    }
 
    if (copy_mask & RADV_DYNAMIC_VIEWPORT_WITH_COUNT) {
@@ -4263,12 +4292,16 @@ radv_get_viewport_zmin_zmax(struct radv_cmd_buffer *cmd_buffer, const VkViewport
 static void
 radv_emit_viewport_state(struct radv_cmd_buffer *cmd_buffer)
 {
-   const struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
+   struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
    const struct radv_physical_device *pdev = radv_device_physical(device);
    const enum radv_depth_clamp_mode depth_clamp_mode = cmd_buffer->state.depth_clamp_mode;
    const struct radv_dynamic_state *d = &cmd_buffer->state.dynamic;
    struct radv_cmd_stream *cs = cmd_buffer->cs;
 
+   if (RADV_WDDM2_DEBUG)
+      if (getenv("RADV_WDDM2_DBG"))
+         fprintf(stderr, "radv: EMIT_VIEWPORT count=%u x0=%f y0=%f\n", d->vk.vp.viewport_count,
+              d->vp_xform[0].scale[0], d->vp_xform[0].scale[1]);
    assert(d->vk.vp.viewport_count);
 
    radeon_begin(cs);
@@ -13517,7 +13550,18 @@ radv_emit_all_graphics_states(struct radv_cmd_buffer *cmd_buffer, const struct r
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
    const struct radv_physical_device *pdev = radv_device_physical(device);
 
-   const uint64_t dynamic_states = cmd_buffer->state.dirty_dynamic & radv_get_needed_dynamic_states(cmd_buffer);
+const uint64_t dynamic_states = cmd_buffer->state.dirty_dynamic & radv_get_needed_dynamic_states(cmd_buffer);
+    if (RADV_WDDM2_DEBUG)
+       if (getenv("RADV_WDDM2_DBG"))
+          fprintf(stderr,
+                  "radv: emit_all dirty=0x%llx dirty_dyn=0x%llx needed=0x%llx dyn_states=0x%llx vp_in_dyn=%d vp_dirty_bit=%d "
+                  "scissor_bit=%d\n",
+                  (unsigned long long)cmd_buffer->state.dirty,
+                  (unsigned long long)cmd_buffer->state.dirty_dynamic,
+                  (unsigned long long)radv_get_needed_dynamic_states(cmd_buffer),
+                  (unsigned long long)dynamic_states, !!(dynamic_states & RADV_DYNAMIC_VIEWPORT),
+                  !!(dynamic_states & (RADV_DYNAMIC_VIEWPORT | RADV_DYNAMIC_VIEWPORT_WITH_COUNT | RADV_DYNAMIC_DEPTH_CLIP_NEGATIVE_ONE_TO_ONE)),
+                  !!(dynamic_states & (RADV_DYNAMIC_SCISSOR | RADV_DYNAMIC_SCISSOR_WITH_COUNT)));
    if (cmd_buffer->state.dirty & (RADV_CMD_DIRTY_GRAPHICS_PIPELINE | RADV_CMD_DIRTY_GRAPHICS_SHADERS)) {
       cmd_buffer->state.dirty |= RADV_CMD_DIRTY_OVERRIDE_VRS_STATE;
    }
