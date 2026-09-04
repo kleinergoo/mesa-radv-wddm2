@@ -44,6 +44,7 @@ typedef void *drmDevicePtr;
 #ifdef HAVE_VULKAN_DX
 #include "winsys/wddm2/radv_wddm2_winsys_public.h"
 #include "vk_dx_adapter_info.h"
+#include "vk_wddm2_monitored_fence.h"
 #endif
 #include "git_sha1.h"
 
@@ -2948,8 +2949,11 @@ create_dx_physical_device(struct vk_instance *vk_instance,
 
    memcpy(&pdev->info, &winsys_info.base, sizeof(pdev->info));
 
+   pdev->sync_binary_type = vk_sync_binary_get_type(&vk_wddm2_monitored_fence_type);
+   pdev->sync_types[0] = &vk_wddm2_monitored_fence_type;
+   pdev->sync_types[1] = &pdev->sync_binary_type.sync;
+   pdev->sync_types[2] = NULL;
    pdev->vk.supported_sync_types = pdev->sync_types;
-   pdev->sync_types[0] = NULL;
 
    if (!radv_is_gpu_supported(&pdev->info)) {
       if (instance->debug_flags & RADV_DEBUG_STARTUP)
