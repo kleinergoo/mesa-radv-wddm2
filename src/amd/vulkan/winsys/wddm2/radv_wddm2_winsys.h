@@ -30,7 +30,6 @@
 
 #include "util/list.h"
 #include "util/simple_mtx.h"
-#include "util/vma.h"
 #include "vk_wddm2_dispatch_table.h"
 #include "ac_gpu_info.h"
 #include "radv_winsys_bo.h"
@@ -72,13 +71,17 @@ struct radv_wddm2_winsys {
    uint32_t paging_queue_h;
    uint32_t paging_fence_h;
 
-   simple_mtx_t heap_mtx;
-   struct util_vma_heap heap;
-   struct util_vma_heap _32bit_heap;
-   struct util_vma_heap replay_heap;
-
    struct radv_winsys_bo_list global_bo_list;
    struct radv_winsys_bo_log bo_log;
+
+   /* In-process device memory accounting.  Reported as RADEON_ALLOCATED_*
+    * so that the Vulkan heap-budget math (radv_get_memory_budget_properties)
+    * stays flat like the amdgpu/Linux winsys instead of collapsing to the
+    * WDDM2 "CurrentReservation == 0" value. */
+   simple_mtx_t alloc_mtx;
+   uint64_t alloc_vram;
+   uint64_t alloc_vram_vis;
+   uint64_t alloc_gtt;
 
    simple_mtx_t deferred_mtx;
    struct list_head deferred_list;

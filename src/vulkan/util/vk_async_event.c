@@ -26,6 +26,7 @@
 #include <assert.h>
 #include <stdio.h>
 
+#include "util/u_debug.h"
 #include "util/macros.h"
 
 #ifndef _WIN32
@@ -68,10 +69,10 @@ vk_async_event_wait(HANDLE event, uint64_t rel_timeout_ns)
 
 #ifdef _WIN32
    DWORD ret = WaitForSingleObject(event, rel_timeout_ms);
-   fprintf(stderr, "WaitForSingleObject: 0x%X\n", ret);
+   if (unlikely(debug_get_bool_option("RADV_WDDM2_ASYNC_EVENT_DEBUG", false)))
+      fprintf(stderr, "WaitForSingleObject: 0x%X\n", ret);
    switch (ret) {
    case WAIT_TIMEOUT:
-      fprintf(stderr, "TIMEOUT\n");
       return VK_TIMEOUT;
    case WAIT_OBJECT_0:
       return VK_SUCCESS;
@@ -86,16 +87,14 @@ vk_async_event_wait(HANDLE event, uint64_t rel_timeout_ns)
    int ret = poll(&event_poll, 1, rel_timeout_ms);
    if (ret < 0 && (errno == EINTR || errno == EAGAIN)) {
       /* Treat this as an early timeout.  The caller loops anyway */
-      fprintf(stderr, "TIMEOUT\n");
       return VK_TIMEOUT;
    } else if (ret < 0) {
       return VK_ERROR_UNKNOWN;
    } else if (ret > 0) {
       assert(event_poll.revents & POLLIN);
       return VK_SUCCESS;
-   } else { 
+   } else {
       /* No events */
-      fprintf(stderr, "no event\n");
       return VK_TIMEOUT;
    }
 #endif

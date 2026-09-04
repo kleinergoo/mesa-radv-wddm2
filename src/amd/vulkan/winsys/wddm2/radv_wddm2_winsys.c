@@ -73,6 +73,16 @@
 static simple_mtx_t winsys_creation_mutex = SIMPLE_MTX_INITIALIZER;
 static struct hash_table *winsyses = NULL;
 
+/* Key the winsys hash table on the adapter LUID so more than one adapter can
+ * be handled (the previous (void *) 1 constant keyed every adapter to the same
+ * slot, silently deduplicating distinct adapters).  The 8-byte LUID packs into
+ * a single uintptr_t. */
+static uintptr_t
+winsys_luid_key(const LUID *luid)
+{
+   return ((uintptr_t)(uint32_t)luid->HighPart << 32) | (uint32_t)luid->LowPart;
+}
+
 static NTSTATUS
 query_adapter_info(struct radv_wddm2_winsys *ws,
                    KMTQUERYADAPTERINFOTYPE info_type,
@@ -167,8 +177,9 @@ radv_wddm2_fill_gpu_info(struct radv_wddm2_winsys *ws,
 
       dev.device_id = query_ids.DeviceIds.DeviceID;
       dev.pci_rev = query_ids.DeviceIds.RevisionID;
-      fprintf(stderr, "phys adapter = %i device = %x rev %x\n", adapter_info->physical_adapter_index, dev.device_id,
-              dev.pci_rev);
+      if (ws->debug_all_bos)
+         fprintf(stderr, "phys adapter = %i device = %x rev %x\n", adapter_info->physical_adapter_index, dev.device_id,
+                 dev.pci_rev);
    }
 
    /* PCI bus address */
@@ -196,7 +207,22 @@ radv_wddm2_fill_gpu_info(struct radv_wddm2_winsys *ws,
                                         &segment, sizeof(segment)))) {
          mem.gtt.total_heap_size = segment.SharedSystemMemorySize;
          mem.vram.total_heap_size = segment.DedicatedVideoMemorySize;
-         mem.cpu_accessible_vram.total_heap_size = segment.DedicatedVideoMemorySize;
+         /*
+          * Do NOT report the full DedicatedVideoMemory as CPU-accessible here.
+          *
+          * On a discrete GPU the segment query reports the entire VRAM as CPU
+          * accessible, which collapses the hidden-VRAM heap (all_vram_visible=1)
+          * and exposes every DEVICE_LOCAL allocation as HOST_VISIBLE. That
+          * diverges from the Linux/amdgpu memory model (a small BAR aperture of
+          * ~256 MiB visible VRAM + a large hidden VRAM heap) and forces the whole
+          * allocation stream through the fragile WDDM2 host-mapping path, which
+          * can produce stale/NULL host pointers that corrupt engine control flow.
+          *
+          * cpu_accessible_vram is set authoritatively below: from the static
+          * amdgpu device database when a device match exists, or from the
+          * KMD vram_vis_size in the RDNA3 dynamic query fallback.
+          */
+         mem.cpu_accessible_vram.total_heap_size = 0;
       }
    }
 
@@ -218,9 +244,10 @@ radv_wddm2_fill_gpu_info(struct radv_wddm2_winsys *ws,
          };
          if (NT_SUCCESS(query_adapter_info(ws, KMTQAITYPE_NODEMETADATA,
                                            &metadata, sizeof(metadata)))) {
-            fprintf(stderr, "node %i (type: %i) = %ls, flags = %x\n",
-                    i, metadata.NodeData.EngineType, metadata.NodeData.FriendlyName,
-                    metadata.NodeData.Flags.Value);
+            if (ws->debug_all_bos)
+               fprintf(stderr, "node %i (type: %i) = %ls, flags = %x\n",
+                       i, metadata.NodeData.EngineType, metadata.NodeData.FriendlyName,
+                       metadata.NodeData.Flags.Value);
             if (metadata.NodeData.EngineType == DXGK_ENGINE_TYPE_3D)
                node = i;
          }
@@ -242,8 +269,9 @@ radv_wddm2_fill_gpu_info(struct radv_wddm2_winsys *ws,
    bool has_tiling_info = false;
 
    if (amdgpu_dev) {
-      fprintf(stderr, "radv/wddm2: Matched static device config for '%s' (0x%04x)\n",
-              amdgpu_dev->name, dev.device_id);
+      if (ws->debug_all_bos)
+         fprintf(stderr, "radv/wddm2: Matched static device config for '%s' (0x%04x)\n",
+                 amdgpu_dev->name, dev.device_id);
       dev = amdgpu_dev->dev;
       dev.device_id = query_ids.DeviceIds.DeviceID;
       dev.pci_rev = query_ids.DeviceIds.RevisionID;
@@ -260,8 +288,14 @@ radv_wddm2_fill_gpu_info(struct radv_wddm2_winsys *ws,
 
       if (mem.vram.total_heap_size == 0) {
          mem.vram.total_heap_size = amdgpu_dev->mem.vram.total_heap_size;
-         mem.cpu_accessible_vram.total_heap_size = amdgpu_dev->mem.cpu_accessible_vram.total_heap_size;
       }
+      /* The static amdgpu device database carries the authoritative CPU-visible
+       * (BAR aperture) VRAM size for this discrete device. Always honor it so
+       * the Vulkan memory model matches Linux (hidden VRAM heap + small visible
+       * aperture) instead of exposing all dedicated VRAM as host-visible.
+       */
+      if (amdgpu_dev->mem.cpu_accessible_vram.total_heap_size)
+         mem.cpu_accessible_vram.total_heap_size = amdgpu_dev->mem.cpu_accessible_vram.total_heap_size;
       if (mem.gtt.total_heap_size == 0) {
          mem.gtt.total_heap_size = amdgpu_dev->mem.gtt.total_heap_size;
       }
@@ -529,7 +563,19 @@ radv_wddm2_winsys_query_value(struct radeon_winsys *_ws, enum radeon_value_id va
    switch (value) {
    case RADEON_ALLOCATED_VRAM:
    case RADEON_ALLOCATED_VRAM_VIS:
-   case RADEON_ALLOCATED_GTT:
+   case RADEON_ALLOCATED_GTT: {
+      simple_mtx_lock(&ws->alloc_mtx);
+      uint64_t ret = 0;
+      if (value == RADEON_ALLOCATED_VRAM)
+         ret = ws->alloc_vram;
+      else if (value == RADEON_ALLOCATED_VRAM_VIS)
+         ret = ws->alloc_vram_vis;
+      else
+         ret = ws->alloc_gtt;
+      simple_mtx_unlock(&ws->alloc_mtx);
+      return ret;
+   }
+
    case RADEON_VRAM_USAGE:
    case RADEON_VRAM_VIS_USAGE:
    case RADEON_GTT_USAGE: {
@@ -537,13 +583,10 @@ radv_wddm2_winsys_query_value(struct radeon_winsys *_ws, enum radeon_value_id va
          .hAdapter = ws->adapter_h,
       };
       switch (value) {
-      case RADEON_ALLOCATED_VRAM:
-      case RADEON_ALLOCATED_VRAM_VIS:
       case RADEON_VRAM_USAGE:
       case RADEON_VRAM_VIS_USAGE:
          mem_info.MemorySegmentGroup = D3DKMT_MEMORY_SEGMENT_GROUP_LOCAL;
          break;
-      case RADEON_ALLOCATED_GTT:
       case RADEON_GTT_USAGE:
          mem_info.MemorySegmentGroup = D3DKMT_MEMORY_SEGMENT_GROUP_NON_LOCAL;
          break;
@@ -556,11 +599,6 @@ radv_wddm2_winsys_query_value(struct radeon_winsys *_ws, enum radeon_value_id va
          return 0;
 
       switch (value) {
-      case RADEON_ALLOCATED_VRAM:
-      case RADEON_ALLOCATED_VRAM_VIS:
-      case RADEON_ALLOCATED_GTT:
-         return mem_info.CurrentReservation;
-
       case RADEON_VRAM_USAGE:
       case RADEON_VRAM_VIS_USAGE:
       case RADEON_GTT_USAGE:
@@ -584,7 +622,7 @@ radv_wddm2_winsys_destroy(struct radeon_winsys *_ws)
 
    simple_mtx_lock(&winsys_creation_mutex);
    if (!--ws->refcount) {
-      _mesa_hash_table_remove_key(winsyses, (void *) 1);
+      _mesa_hash_table_remove_key(winsyses, (void *) winsys_luid_key(&ws->adapter_luid));
 
       /* Clean the hashtable up if empty, though there is no
        * empty function. */
@@ -657,14 +695,14 @@ radv_wddm2_winsys_query_gpuvm_fault(struct radeon_winsys *rws, struct radv_winsy
       .StateType = D3DKMT_DEVICESTATE_PAGE_FAULT,
    };
    status = WDDM2_DISPATCH(GetDeviceState(&get_state));
-   fprintf(stderr, "GetDeviceState: 0x%X\n", status);
    if (unlikely(!NT_SUCCESS(status)))
       return false;
 
    D3DKMT_DEVICEPAGEFAULT_STATE fault = get_state.PageFaultState;
 
-   fprintf(stderr, "faulted VA: 0x%" PRIx64 ", error: 0x%x (vendor specific: %i)\n",
-           fault.FaultedVirtualAddress, fault.FaultErrorCode.GeneralErrorCode, fault.FaultErrorCode.DeviceSpecificCode);
+   if (ws->debug_all_bos)
+      fprintf(stderr, "faulted VA: 0x%" PRIx64 ", error: 0x%x (vendor specific: %i)\n",
+              fault.FaultedVirtualAddress, fault.FaultErrorCode.GeneralErrorCode, fault.FaultErrorCode.DeviceSpecificCode);
    if (!fault.FaultedVirtualAddress)
       return false;
 
@@ -682,7 +720,6 @@ radv_wddm2_winsys_create(const struct vk_dx_adapter_info *adapter_info,
    VkResult result = VK_SUCCESS;
    struct radv_wddm2_winsys *ws = NULL;
    NTSTATUS status;
-   fprintf(stderr, "radv_wddm2_winsys_create\n");
 
    /* We have to keep this lock till insertion. */
    simple_mtx_lock(&winsys_creation_mutex);
@@ -694,7 +731,8 @@ radv_wddm2_winsys_create(const struct vk_dx_adapter_info *adapter_info,
       goto fail;
    }
 
-   struct hash_entry *entry = _mesa_hash_table_search(winsyses, (void *) 1);
+   struct hash_entry *entry = _mesa_hash_table_search(winsyses,
+                                                      (void *) winsys_luid_key(&adapter_info->adapter_luid));
    if (entry) {
       ws = (struct radv_wddm2_winsys *)entry->data;
       ++ws->refcount;
@@ -722,12 +760,14 @@ radv_wddm2_winsys_create(const struct vk_dx_adapter_info *adapter_info,
    radv_winsys_bo_log_init(&ws->bo_log, debug_flags);
    simple_mtx_init(&ws->deferred_mtx, mtx_plain);
    list_inithead(&ws->deferred_list);
+   simple_mtx_init(&ws->alloc_mtx, mtx_plain);
+   ws->alloc_vram = 0;
+   ws->alloc_vram_vis = 0;
+   ws->alloc_gtt = 0;
 
    D3DKMT_OPENADAPTERFROMLUID open_adapter = {
       .AdapterLuid = ws->adapter_luid,
    };
-   fprintf(stderr, "OpenAdapterFromLuid 0x%x 0x%x\n",
-           adapter_info->adapter_luid.HighPart, adapter_info->adapter_luid.LowPart);
    status = WDDM2_DISPATCH(OpenAdapterFromLuid(&open_adapter));
    if (!NT_SUCCESS(status)) {
       fprintf(stderr, "Can't open adapter with luid %X%X\n", adapter_info->adapter_luid.LowPart, adapter_info->adapter_luid.HighPart);
@@ -777,12 +817,6 @@ radv_wddm2_winsys_create(const struct vk_dx_adapter_info *adapter_info,
    ws->paging_queue_h = create_paging_queue.hPagingQueue;
    ws->paging_fence_h = create_paging_queue.hSyncObject;
 
-   /* Initialize the heaps */
-   simple_mtx_init(&ws->heap_mtx, mtx_plain);
-   util_vma_heap_init(&ws->_32bit_heap, RADV_WDDM2_32BIT_HEAP_START, 1ull << 32);
-   util_vma_heap_init(&ws->heap, RADV_WDDM2_HEAP_START, RADV_WDDM2_REPLAY_HEAP_START - RADV_WDDM2_HEAP_START);
-   util_vma_heap_init(&ws->replay_heap, RADV_WDDM2_REPLAY_HEAP_START, 1ull << 32);
-
    ws->base.destroy = radv_wddm2_winsys_destroy;
    ws->base.query_info = radv_wddm2_winsys_query_info;
    ws->base.query_value = radv_wddm2_winsys_query_value;
@@ -799,7 +833,7 @@ radv_wddm2_winsys_create(const struct vk_dx_adapter_info *adapter_info,
    ws->sync_types[1] = &ws->sync_binary_type.sync;
    ws->sync_types[2] = NULL;
 
-   _mesa_hash_table_insert(winsyses, (void *) 1, ws);
+   _mesa_hash_table_insert(winsyses, (void *) winsys_luid_key(&ws->adapter_luid), ws);
    simple_mtx_unlock(&winsys_creation_mutex);
 
    *winsys = &ws->base;

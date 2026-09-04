@@ -240,68 +240,74 @@ vk_wddm2_monitored_fence_wait_many(struct vk_device *device,
                                    enum vk_sync_wait_flags wait_flags,
                                    uint64_t abs_timeout_ns)
 {
-   VkResult result;
    NTSTATUS status;
 
-   /* Quick poll all the fences ourselves.  We may not have to call into the
-    * kernel at all.
-    */
-   uint32_t ready = 0;
-   for (uint32_t i = 0; i < wait_count; i++) {
-      struct vk_wddm2_monitored_fence *fence =
-         to_wddm2_monitored_fence(waits[i].sync);
+   for (;;) {
+      VkResult result = VK_ERROR_UNKNOWN;
 
-      if (p_atomic_read(fence->value_map) >= waits[i].wait_value)
-         ready++;
-   }
-   if (ready == wait_count || ((wait_flags & VK_SYNC_WAIT_ANY) && ready > 0))
-      return VK_SUCCESS;
+      /* Quick poll all the fences ourselves.  We may not have to call into the
+       * kernel at all.
+       */
+      uint32_t ready = 0;
+      for (uint32_t i = 0; i < wait_count; i++) {
+         struct vk_wddm2_monitored_fence *fence =
+            to_wddm2_monitored_fence(waits[i].sync);
 
-   if (abs_timeout_ns == 0)
-      return VK_TIMEOUT;
+         if (p_atomic_read(fence->value_map) >= waits[i].wait_value)
+            ready++;
+      }
+      if (ready == wait_count || ((wait_flags & VK_SYNC_WAIT_ANY) && ready > 0))
+         return VK_SUCCESS;
 
-   uint64_t now_ns = os_time_get_nano();
-   if (abs_timeout_ns <= now_ns)
-      return VK_TIMEOUT;
+      if (abs_timeout_ns == 0)
+         return VK_TIMEOUT;
 
-   const bool use_event = (abs_timeout_ns >= INT64_MAX);
+      uint64_t now_ns = os_time_get_nano();
+      if (abs_timeout_ns <= now_ns)
+         return VK_TIMEOUT;
 
-   HANDLE async_event = 0;
-   if (use_event) {
+      /*
+       * Always arm the kernel wait against an async event.  Supplying a NULL
+       * event makes D3DKMTWaitForSynchronizationObjectFromCpu block the calling
+       * thread until the fence signals, which would make any *finite* timeout
+       * (VK_SYNC_WAIT_ANY / vkWaitSemaphores / vkWaitForFences with a deadline)
+       * hang past its deadline instead of returning VK_TIMEOUT.  With an event
+       * set the call registers the wait and returns immediately; the loop below
+       * then honors the remaining deadline.
+       */
+      HANDLE async_event = 0;
       result = vk_async_event_create(&async_event);
       if (unlikely(result != VK_SUCCESS))
          return result;
-   }
 
-   STACK_ARRAY(D3DKMT_HANDLE, handles, wait_count);
-   STACK_ARRAY(uint64_t, wait_values, wait_count);
+      STACK_ARRAY(D3DKMT_HANDLE, handles, wait_count);
+      STACK_ARRAY(uint64_t, wait_values, wait_count);
 
-   for (uint64_t i = 0; i < wait_count; i++) {
-      handles[i] = to_wddm2_monitored_fence(waits[i].sync)->handle,
-      wait_values[i] = waits[i].wait_value;
-   }
+      for (uint64_t i = 0; i < wait_count; i++) {
+         handles[i] = to_wddm2_monitored_fence(waits[i].sync)->handle,
+         wait_values[i] = waits[i].wait_value;
+      }
 
-   const D3DKMT_WAITFORSYNCHRONIZATIONOBJECTFROMCPU wait = {
-      .hDevice = device->wddm2_handle,
-      .ObjectCount = wait_count,
-      .ObjectHandleArray = handles,
-      .FenceValueArray = wait_values,
-      .Flags = {
-         .WaitAny = (wait_flags & VK_SYNC_WAIT_ANY) != 0,
-      },
-      .hAsyncEvent = async_event,
-   };
-   status = WDDM2_DISPATCH(WaitForSynchronizationObjectFromCpu(&wait));
+      const D3DKMT_WAITFORSYNCHRONIZATIONOBJECTFROMCPU wait = {
+         .hDevice = device->wddm2_handle,
+         .ObjectCount = wait_count,
+         .ObjectHandleArray = handles,
+         .FenceValueArray = wait_values,
+         .Flags = {
+            .WaitAny = (wait_flags & VK_SYNC_WAIT_ANY) != 0,
+         },
+         .hAsyncEvent = async_event,
+      };
+      status = WDDM2_DISPATCH(WaitForSynchronizationObjectFromCpu(&wait));
 
-   STACK_ARRAY_FINISH(handles);
-   STACK_ARRAY_FINISH(wait_values);
+      STACK_ARRAY_FINISH(handles);
+      STACK_ARRAY_FINISH(wait_values);
 
-   if (unlikely(!NT_SUCCESS(status))) {
-      result = NTSTATUS_to_VkResult(device, status);
-      goto fail_close_event;
-   }
+      if (unlikely(!NT_SUCCESS(status))) {
+         vk_async_event_close(async_event);
+         return NTSTATUS_to_VkResult(device, status);
+      }
 
-   if (use_event) {
       /* We loop here for a couple reasons:
        *
        *  1. Windows WaitForSingleObject has a maximum timeout of 49.7 days
@@ -321,20 +327,23 @@ vk_wddm2_monitored_fence_wait_many(struct vk_device *device,
 
          result = vk_async_event_wait(async_event, rel_timeout_ns);
          if (unlikely(result != VK_SUCCESS))
-            goto fail_close_event;
+            break;
 
          now_ns = os_time_get_nano();
       } while (abs_timeout_ns <= now_ns);
-   }
 
-   if (result == VK_SUCCESS)
-      result = vk_wddm2_check_device_status(device);
-
-fail_close_event:
-   if (use_event)
       vk_async_event_close(async_event);
 
-   return result;
+      if (result == VK_SUCCESS)
+         result = vk_wddm2_check_device_status(device);
+      if (result != VK_SUCCESS)
+         return result;
+
+      /* Re-verify the shared value_map (source of truth): the kernel may signal
+       * the async event marginally before the fence values are committed, so
+       * loop back and re-arm instead of trusting the event alone.
+       */
+   }
 }
 
 #ifdef _WIN32

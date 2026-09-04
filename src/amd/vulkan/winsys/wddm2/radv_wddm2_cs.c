@@ -226,7 +226,10 @@ radv_wddm2_queue_init(struct radv_wddm2_winsys *ws, enum amd_ip_type hw_ip,
       node = debug_get_num_option("RADV_DXGI_3D_NODE", 0);
       break;
    case AMD_IP_COMPUTE:
-      node = debug_get_num_option("RADV_DXGI_COMPUTE_NODE", 2);
+      /* Use the same node as GFX by default: standalone compute submissions to
+       * node 2 fault the GPU on this backend (see radv_wddm2_cs_submit).  The
+       * 3D node (0) also hosts the compute/ACE engine on single-node parts. */
+      node = debug_get_num_option("RADV_DXGI_COMPUTE_NODE", 0);
       break;
    default:
       /* Not supported */
@@ -240,7 +243,10 @@ radv_wddm2_queue_init(struct radv_wddm2_winsys *ws, enum amd_ip_type hw_ip,
    D3DKMT_CREATECONTEXTVIRTUAL create_context = {
       .hDevice = ws->device_h,
       .NodeOrdinal = node,
-      .EngineAffinity = 1, // TODO
+      /* Bitmask selecting engine instance(s) within the node. Engine 0 is the
+       * only engine on single-node discrete parts (Polaris); multi-node parts
+       * are not supported by this backend. */
+      .EngineAffinity = 1,
       .Flags = {
          .DisableGpuTimeout = true,
       },
@@ -265,6 +271,7 @@ radv_wddm2_queue_init(struct radv_wddm2_winsys *ws, enum amd_ip_type hw_ip,
       D3DKMT_CREATEHWCONTEXT create_hw_context = {
          .hDevice = ws->device_h,
          .NodeOrdinal = node,
+         /* Engine 0 is the only engine on single-node discrete parts. */
          .EngineAffinity = 1,
          .PrivateDriverDataSize = sizeof(create_context_data),
          .pPrivateDriverData = &create_context_data,
@@ -372,54 +379,65 @@ vk_wddm2_fence_wait(uint32_t device_h, struct vk_wddm2_fence *fence)
    NTSTATUS status;
    HANDLE async_event = 0;
 
-   /* Quick poll all the fences ourselves.  We may not have to call into the
-    * kernel at all.
-    */
-   if (p_atomic_read(fence->value_map) >= fence->wait_value)
-      return true;
+   for (;;) {
+      /* Quick poll the fence ourselves.  We may not have to call into the
+       * kernel at all.
+       */
+      if (p_atomic_read(fence->value_map) >= fence->wait_value)
+         return true;
 
-   result = vk_async_event_create(&async_event);
-   if (unlikely(result != VK_SUCCESS))
-      return false;
+      result = vk_async_event_create(&async_event);
+      if (unlikely(result != VK_SUCCESS))
+         return false;
 
-   const D3DKMT_WAITFORSYNCHRONIZATIONOBJECTFROMCPU wait = {
-      .hDevice = device_h,
-      .ObjectCount = 1,
-      .ObjectHandleArray = &fence->handle,
-      .FenceValueArray = &fence->wait_value,
-      .hAsyncEvent = async_event,
-   };
-   status = WDDM2_DISPATCH(WaitForSynchronizationObjectFromCpu(&wait));
+      const D3DKMT_WAITFORSYNCHRONIZATIONOBJECTFROMCPU wait = {
+         .hDevice = device_h,
+         .ObjectCount = 1,
+         .ObjectHandleArray = &fence->handle,
+         .FenceValueArray = &fence->wait_value,
+         .hAsyncEvent = async_event,
+      };
+      status = WDDM2_DISPATCH(WaitForSynchronizationObjectFromCpu(&wait));
 
-   if (unlikely(!NT_SUCCESS(status))) {
+      if (unlikely(!NT_SUCCESS(status))) {
+         vk_async_event_close(async_event);
+         fprintf(stderr, "fence wait failed: 0x%X\n", status);
+         return false;
+      }
+
+      result = vk_async_event_wait(async_event, 10000000000ull);
       vk_async_event_close(async_event);
-      fprintf(stderr, "fence wait failed: 0x%X\n", status);
-      return false;
-   }
 
-   result = vk_async_event_wait(async_event, 10000000000ull);
-   vk_async_event_close(async_event);
-   if (result != VK_SUCCESS)
-      fprintf(stderr, "async wait event: 0x%x\n", result);
-
-   D3DKMT_GETDEVICESTATE get_state = {
-      .hDevice = device_h,
-      .StateType = D3DKMT_DEVICESTATE_EXECUTION,
-   };
-   status = WDDM2_DISPATCH(GetDeviceState(&get_state));
-
-   if (NT_SUCCESS(status) && get_state.ExecutionState == D3DKMT_DEVICEEXECUTION_ERROR_DMAPAGEFAULT) {
-      get_state.StateType = D3DKMT_DEVICESTATE_PAGE_FAULT;
+      D3DKMT_GETDEVICESTATE get_state = {
+         .hDevice = device_h,
+         .StateType = D3DKMT_DEVICESTATE_EXECUTION,
+      };
       status = WDDM2_DISPATCH(GetDeviceState(&get_state));
-      D3DKMT_DEVICEPAGEFAULT_STATE fault = get_state.PageFaultState;
 
-      fprintf(stderr, "faulted VA: 0x%" PRIx64 ", error: 0x%x (vendor specific: %i), flags: %i, stage: %i\n",
-             fault.FaultedVirtualAddress, fault.FaultErrorCode.GeneralErrorCode,
-             fault.FaultErrorCode.DeviceSpecificCode, fault.PageFaultFlags, fault.FaultedPipelineStage);
-      return false;
+      if (NT_SUCCESS(status) && get_state.ExecutionState == D3DKMT_DEVICEEXECUTION_ERROR_DMAPAGEFAULT) {
+         get_state.StateType = D3DKMT_DEVICESTATE_PAGE_FAULT;
+         status = WDDM2_DISPATCH(GetDeviceState(&get_state));
+         D3DKMT_DEVICEPAGEFAULT_STATE fault = get_state.PageFaultState;
+
+         fprintf(stderr, "faulted VA: 0x%" PRIx64 ", error: 0x%x (vendor specific: %i), flags: %i, stage: %i\n",
+                fault.FaultedVirtualAddress, fault.FaultErrorCode.GeneralErrorCode,
+                fault.FaultErrorCode.DeviceSpecificCode, fault.PageFaultFlags, fault.FaultedPipelineStage);
+         return false;
+      }
+
+      /* The shared value_map is the source of truth: the kernel may signal the
+       * async event marginally before (or after) the fence value is committed
+       * to the monitored-fence CPU address.  Only report completion once the
+       * actual value reflects it, re-arming the wait when the event raced.
+       */
+      if (p_atomic_read(fence->value_map) >= fence->wait_value)
+         return true;
+
+      if (result != VK_SUCCESS) {
+         fprintf(stderr, "async wait event: 0x%x\n", result);
+         return false;
+      }
    }
-
-   return result == VK_SUCCESS;
 }
 
 static bool

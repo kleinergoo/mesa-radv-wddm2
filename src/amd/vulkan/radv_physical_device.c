@@ -496,6 +496,28 @@ radv_physical_device_init_mem_types(struct radv_physical_device *pdev)
 
    unsigned type_count = 0;
 
+   if (getenv("RADV_WDDM2_HEAP_TRACE")) {
+      FILE *h = fopen("radv_heap_trace.log", "w");
+      if (h) {
+         fprintf(h, "radv/wddm2 HEAPTRACE: info vram_kb=%lu vis_kb=%lu gart_kb=%lu has_dedicated=%d all_visible=%d "
+                    "-> vram_size=%lluMiB visible=%lluMiB gtt=%lluMiB heaps=%u\n",
+                 (unsigned long)pdev->info.vram_size_kb, (unsigned long)pdev->info.vram_vis_size_kb,
+                 (unsigned long)pdev->info.gart_size_kb, (int)pdev->info.has_dedicated_vram,
+                 (int)pdev->info.all_vram_visible, (unsigned long long)vram_size >> 20,
+                 (unsigned long long)visible_vram_size >> 20, (unsigned long long)gtt_size >> 20,
+                 pdev->memory_properties.memoryHeapCount);
+         for (unsigned j = 0; j < pdev->memory_properties.memoryHeapCount; j++)
+            fprintf(h, "  heap[%u]: size=%lluMiB flags=0x%x\n", j,
+                    (unsigned long long)pdev->memory_properties.memoryHeaps[j].size >> 20,
+                    pdev->memory_properties.memoryHeaps[j].flags);
+         for (unsigned j = 0; j < type_count; j++)
+            fprintf(h, "  type[%u]: heapIndex=%u flags=0x%x\n", j,
+                    pdev->memory_properties.memoryTypes[j].heapIndex,
+                    pdev->memory_properties.memoryTypes[j].propertyFlags);
+         fclose(h);
+      }
+   }
+
    if (vram_index >= 0 || visible_vram_index >= 0) {
       pdev->memory_domains[type_count] = RADEON_DOMAIN_VRAM;
       pdev->memory_flags[type_count] = RADEON_FLAG_NO_CPU_ACCESS;

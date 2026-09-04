@@ -34,6 +34,7 @@
 #include "radv_wddm2_bo.h"
 #include "radv_wddm2_cs.h"
 #include "util/u_memory.h"
+#include "vk_async_event.h"
 
 /* Xlib headers conflict with DXGI headers */
 #ifdef Status
@@ -52,39 +53,43 @@
 
 static const bool all_resident = true;
 
-static struct util_vma_heap *
-radv_wddm2_bo_heap(struct radv_wddm2_winsys *ws, enum radeon_bo_flag flags)
+/* Wait for a paging operation (map / make-resident) to reach `value` on the
+ * paging queue's fence WITHOUT blocking the calling thread on a raw kernel
+ * wait.  Arming the wait against an async event makes D3DKMT
+ * WaitForSynchronizationObjectFromCpu register the wait and return
+ * immediately; we then await the event.  Under memory pressure the paging
+ * queue can take a long time and a blocking wait object here both freezes the
+ * allocating thread and can't be interrupted, so this is the interruptible
+ * form the rest of the backend already uses for monitor fences. */
+static VkResult
+radv_wddm2_wait_paging_fence(struct radv_wddm2_winsys *ws, uint64_t value)
 {
-   if (flags & RADEON_FLAG_32BIT)
-      return &ws->_32bit_heap;
-   else if (flags & RADEON_FLAG_REPLAYABLE)
-      return &ws->replay_heap;
-   else
-      return &ws->heap;
-}
+   HANDLE async_event = 0;
+   VkResult result = vk_async_event_create(&async_event);
+   if (unlikely(result != VK_SUCCESS))
+      return result;
 
-static uint64_t
-radv_wddm2_bo_va_alloc(struct radv_wddm2_winsys *ws, enum radeon_bo_flag flags,
-                       uint64_t size, uint32_t alignment)
-{
-   struct util_vma_heap *heap = radv_wddm2_bo_heap(ws, flags);
+   const D3DKMT_WAITFORSYNCHRONIZATIONOBJECTFROMCPU wait = {
+      .hDevice = ws->device_h,
+      .ObjectCount = 1,
+      .ObjectHandleArray = &ws->paging_fence_h,
+      .FenceValueArray = &value,
+      .hAsyncEvent = async_event,
+   };
+   NTSTATUS status = WDDM2_DISPATCH(WaitForSynchronizationObjectFromCpu(&wait));
+   if (unlikely(!NT_SUCCESS(status))) {
+      vk_async_event_close(async_event);
+      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+   }
 
-   simple_mtx_lock(&ws->heap_mtx);
-   uint64_t addr = util_vma_heap_alloc(heap, size, alignment);
-   simple_mtx_unlock(&ws->heap_mtx);
+   /* The paging fence is a monitored fence: block on the shared event but keep
+    * polling is unnecessary -- the event is authoritative here.  Wait with an
+    * effectively infinite timeout; a paging stall eventually resolves or the
+    * device is lost (surfacing via the next device-status check). */
+   result = vk_async_event_wait(async_event, UINT64_MAX);
+   vk_async_event_close(async_event);
 
-   return addr;
-}
-
-static void
-radv_wddm2_bo_va_free(struct radv_wddm2_winsys *ws, enum radeon_bo_flag flags,
-                      uint64_t addr, uint64_t size)
-{
-   struct util_vma_heap *heap = radv_wddm2_bo_heap(ws, flags);
-
-   simple_mtx_lock(&ws->heap_mtx);
-   util_vma_heap_free(heap, addr, size);
-   simple_mtx_unlock(&ws->heap_mtx);
+   return result;
 }
 
 #pragma pack(push, 4)
@@ -423,6 +428,28 @@ error_va_reserve:
    return result;
 }
 
+/* Track live device-memory allocations in-process so the Vulkan heap-budget
+ * math (which mirrors the amdgpu/Linux winsys) reports a stable budget instead
+ * of collapsing when WDDM2 uses a stale CurrentReservation == 0. */
+static void
+radv_wddm2_bo_account(struct radv_wddm2_winsys *ws, struct radv_wddm2_bo *bo, int delta)
+{
+   if (bo->base.is_virtual)
+      return;
+
+   const int64_t d = delta;
+   simple_mtx_lock(&ws->alloc_mtx);
+   if (bo->base.initial_domain & RADEON_DOMAIN_VRAM) {
+      if (bo->flags & RADEON_FLAG_CPU_ACCESS)
+         ws->alloc_vram_vis += d;
+      else
+         ws->alloc_vram += d;
+   } else {
+      ws->alloc_gtt += d;
+   }
+   simple_mtx_unlock(&ws->alloc_mtx);
+}
+
 static VkResult
 radv_wddm2_bo_create_internal(struct radeon_winsys *_ws, uint64_t size, unsigned alignment,
                               enum radeon_bo_domain initial_domain, enum radeon_bo_flag flags,
@@ -576,23 +603,16 @@ retry_alloc:
       paging_fence_value = make_resident.PagingFenceValue;
    }
 
-   const D3DKMT_WAITFORSYNCHRONIZATIONOBJECTFROMCPU wait = {
-      .hDevice = ws->device_h,
-      .ObjectCount = 1,
-      .ObjectHandleArray = &ws->paging_fence_h,
-      .FenceValueArray = &paging_fence_value,
-   };
-   status = WDDM2_DISPATCH(WaitForSynchronizationObjectFromCpu(&wait));
-   if (!NT_SUCCESS(status)) {
-      fprintf(stderr, "WaitForSynchronizationObjectFromCpu failed\n");
-      result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+   result = radv_wddm2_wait_paging_fence(ws, paging_fence_value);
+   if (result != VK_SUCCESS)
       goto error_va_alloc;
-   }
 
    if (ws->debug_all_bos)
       radv_winsys_bo_list_add(&ws->global_bo_list, &bo->base);
    if (ws->debug_log_bos)
       radv_winsys_log_bo(&ws->bo_log, &bo->base, false);
+
+   radv_wddm2_bo_account(ws, bo, bo->base.size);
 
    *out_bo = (struct radeon_winsys_bo *)bo;
    return VK_SUCCESS;
@@ -754,17 +774,9 @@ radv_wddm2_bo_from_handle(struct radeon_winsys *_ws, void *handle, unsigned prio
    }
 
    /* Wait for the paging operation to complete */
-   const D3DKMT_WAITFORSYNCHRONIZATIONOBJECTFROMCPU wait = {
-      .hDevice = ws->device_h,
-      .ObjectCount = 1,
-      .ObjectHandleArray = &ws->paging_fence_h,
-      .FenceValueArray = &make_resident.PagingFenceValue,
-   };
-   status = WDDM2_DISPATCH(WaitForSynchronizationObjectFromCpu(&wait));
-   if (!NT_SUCCESS(status)) {
-      result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+   result = radv_wddm2_wait_paging_fence(ws, make_resident.PagingFenceValue);
+   if (result != VK_SUCCESS)
       goto error_map;
-   }
 
    free(pdata);
    *out_bo = &bo->base;
@@ -821,7 +833,7 @@ radv_wddm2_bo_map(struct radeon_winsys *_ws, struct radeon_winsys_bo *_bo,
    struct radv_wddm2_bo *bo = radv_wddm2_bo(_bo);
    ASSERTED NTSTATUS status;
 
-   if (bo->map && !fixed_addr)
+   if (bo->map && !use_fixed_addr)
       return bo->map;
 
    if (bo->flags & RADEON_FLAG_NO_CPU_ACCESS) {
@@ -836,6 +848,20 @@ radv_wddm2_bo_map(struct radeon_winsys *_ws, struct radeon_winsys_bo *_bo,
    status = WDDM2_DISPATCH(Lock2(&lock));
    if (!NT_SUCCESS(status))
       return NULL;
+
+   /* WDDM2 Lock2 cannot place a mapping at a specific CPU address, so the
+    * placed-memory contract (VK_EXT_map_memory_placed / VK_MEMORY_MAP_PLACED_*)
+    * can only be satisfied if the kernel happens to return the requested
+    * address.  Refuse rather than silently handing back a mapping that violates
+    * the placed constraint. */
+   if (use_fixed_addr && lock.pData != fixed_addr) {
+      D3DKMT_UNLOCK2 unlock = {
+         .hDevice = bo->ws->device_h,
+         .hAllocation = bo->base.handle,
+      };
+      WDDM2_DISPATCH(Unlock2(&unlock));
+      return NULL;
+   }
 
    bo->map = lock.pData;
 
@@ -885,15 +911,7 @@ radv_wddm2_bo_make_resident(struct radeon_winsys *_ws, struct radeon_winsys_bo *
       if (!NT_SUCCESS(status))
          return VK_ERROR_OUT_OF_DEVICE_MEMORY;
 
-      const D3DKMT_WAITFORSYNCHRONIZATIONOBJECTFROMCPU wait = {
-         .hDevice = ws->device_h,
-         .ObjectCount = 1,
-         .ObjectHandleArray = &ws->paging_fence_h,
-         .FenceValueArray = &make_resident.PagingFenceValue,
-      };
-      status = WDDM2_DISPATCH(WaitForSynchronizationObjectFromCpu(&wait));
-      if (!NT_SUCCESS(status))
-         return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+      return radv_wddm2_wait_paging_fence(ws, make_resident.PagingFenceValue);
    } else {
       D3DKMT_EVICT evict = {
          .hDevice = ws->device_h,
@@ -950,6 +968,8 @@ radv_wddm2_bo_destroy_now(struct radv_wddm2_winsys *ws, struct radv_wddm2_bo *bo
       if (ws->debug_log_bos)
          radv_winsys_log_bo(&ws->bo_log, &bo->base, true);
    }
+
+   radv_wddm2_bo_account(ws, bo, -bo->base.size);
 
    FREE(bo);
 }

@@ -19,6 +19,53 @@
 #include "vk_debug_utils.h"
 #include "vk_log.h"
 
+/* --- env-gated trace of the application's memory stream (diagnostic) --- */
+static FILE *radv_alloc_trace_fp(void)
+{
+   static FILE *fp = NULL;
+   if (!fp && getenv("RADV_WDDM2_ALLOC_TRACE"))
+      fp = fopen("radv_alloc_trace.log", "w");
+   return fp;
+}
+
+static unsigned long long radv_alloc_trace_seq(void)
+{
+   static unsigned long long seq = 0;
+   return ++seq;
+}
+
+static void
+radv_alloc_trace_log(uint64_t size, uint32_t mem_type_index, uint32_t heap_index, bool dedicated, VkResult result)
+{
+   FILE *fp = radv_alloc_trace_fp();
+   if (!fp)
+      return;
+   fprintf(fp, "%llu ALLOC mem_idx=%u heap=%u size=%llu dedicated=%d result=%d\n",
+           (unsigned long long)radv_alloc_trace_seq(), (unsigned)mem_type_index, heap_index,
+           (unsigned long long)size, (int)dedicated, (int)result);
+   fflush(fp);
+}
+
+static void radv_alloc_trace_free(unsigned long long size)
+{
+   FILE *fp = radv_alloc_trace_fp();
+   if (!fp)
+      return;
+   fprintf(fp, "%llu FREE size=%llu\n", (unsigned long long)radv_alloc_trace_seq(),
+           (unsigned long long)size);
+   fflush(fp);
+}
+
+static void radv_alloc_trace_map(unsigned long long size, const void *ptr)
+{
+   FILE *fp = radv_alloc_trace_fp();
+   if (!fp)
+      return;
+   fprintf(fp, "%llu MAP size=%llu ptr=%p\n", (unsigned long long)radv_alloc_trace_seq(),
+           (unsigned long long)size, ptr);
+   fflush(fp);
+}
+
 static void
 radv_device_memory_emit_report(struct radv_device *device, struct radv_device_memory *mem, bool is_alloc,
                                VkResult result)
@@ -329,9 +376,15 @@ radv_alloc_memory(struct radv_device *device, const VkMemoryAllocateInfo *pAlloc
 
    radv_device_memory_emit_report(device, mem, /* is_alloc */ true, result);
 
+   radv_alloc_trace_log(mem->bo->size, pAllocateInfo->memoryTypeIndex, mem->heap_index,
+                        dedicate_info != NULL, VK_SUCCESS);
    return VK_SUCCESS;
 
 fail:
+   radv_alloc_trace_log(pAllocateInfo->allocationSize, pAllocateInfo->memoryTypeIndex,
+                        radv_device_physical(device)
+                           ->memory_properties.memoryTypes[pAllocateInfo->memoryTypeIndex].heapIndex,
+                        dedicate_info != NULL, result);
    radv_free_memory(device, pAllocator, mem);
    radv_device_memory_emit_report(device, mem, /* is_alloc */ true, result);
 
@@ -355,6 +408,7 @@ radv_FreeMemory(VkDevice _device, VkDeviceMemory _mem, const VkAllocationCallbac
    if (mem)
       radv_device_memory_emit_report(device, mem, /* is_alloc */ false, VK_SUCCESS);
 
+   radv_alloc_trace_free(mem ? (unsigned long long)mem->bo->size : 0);
    radv_free_memory(device, pAllocator, mem);
 }
 
@@ -383,6 +437,7 @@ radv_MapMemory2(VkDevice _device, const VkMemoryMapInfo *pMemoryMapInfo, void **
    if (*ppData) {
       vk_rmv_log_cpu_map(&device->vk, radv_buffer_get_va(mem->bo), false);
       *ppData = (uint8_t *)*ppData + pMemoryMapInfo->offset;
+      radv_alloc_trace_map(mem->bo->size, *ppData);
       return VK_SUCCESS;
    }
 
