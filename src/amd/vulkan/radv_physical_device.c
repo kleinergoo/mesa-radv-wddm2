@@ -43,6 +43,7 @@ typedef void *drmDevicePtr;
 #endif
 #ifdef HAVE_VULKAN_DX
 #include "winsys/wddm2/radv_wddm2_winsys_public.h"
+#include "vk_dx_adapter_info.h"
 #endif
 #include "git_sha1.h"
 
@@ -1935,7 +1936,7 @@ radv_get_physical_device_properties(struct radv_physical_device *pdev)
 
       /* Vulkan 1.1 */
       .driverID = VK_DRIVER_ID_MESA_RADV,
-      .deviceLUIDValid = false, /* The LUID is for Windows. */
+      .deviceLUIDValid = pdev->info.valid_luid,
       .deviceNodeMask = 0,
       .subgroupSize = RADV_SUBGROUP_SIZE,
       .subgroupSupportedStages =
@@ -2422,7 +2423,10 @@ radv_get_physical_device_properties(struct radv_physical_device *pdev)
 
    memcpy(p->deviceUUID, pdev->device_uuid, VK_UUID_SIZE);
    memcpy(p->driverUUID, pdev->driver_uuid, VK_UUID_SIZE);
-   memset(p->deviceLUID, 0, VK_LUID_SIZE);
+   if (pdev->info.valid_luid)
+      memcpy(p->deviceLUID, pdev->info.luid, VK_LUID_SIZE);
+   else
+      memset(p->deviceLUID, 0, VK_LUID_SIZE);
 
    snprintf(p->driverName, VK_MAX_DRIVER_NAME_SIZE, "radv");
    snprintf(p->driverInfo, VK_MAX_DRIVER_INFO_SIZE, "Mesa " PACKAGE_VERSION MESA_GIT_SHA1 "%s",
@@ -2610,13 +2614,6 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
    }
 
    int num_sync_types = 0;
-#ifdef HAVE_VULKAN_DX
-   if (pdev->ws->get_wddm2_handle) {
-      const struct vk_sync_type *const *sync_types = radv_wddm2_winsys_get_sync_types(pdev->ws);
-      for (num_sync_types = 0; sync_types[num_sync_types]; num_sync_types++)
-         pdev->sync_types[num_sync_types] = sync_types[num_sync_types];
-   } else
-#endif
    if (pdev->syncobj_sync_type.features) {
       if (!pdev->info.has_timeline_syncobj && pdev->syncobj_sync_type.features & VK_SYNC_FEATURE_TIMELINE) {
          pdev->syncobj_sync_type.get_value = NULL;
@@ -2911,6 +2908,228 @@ create_drm_physical_device(struct vk_instance *vk_instance, struct _drmDevice *d
 #endif
 }
 
+#ifdef HAVE_VULKAN_DX
+VkResult
+create_dx_physical_device(struct vk_instance *vk_instance,
+                          const struct vk_dx_adapter_info *adapter,
+                          void *unk_adapter,
+                          struct vk_physical_device **out)
+{
+   struct radv_instance *instance = (struct radv_instance *)vk_instance;
+   VkResult result;
+
+   if (adapter->vendor_id != ATI_VENDOR_ID)
+      return VK_ERROR_INCOMPATIBLE_DRIVER;
+
+   struct radv_physical_device *pdev =
+      vk_zalloc2(&instance->vk.alloc, NULL, sizeof(*pdev), 8, VK_SYSTEM_ALLOCATION_SCOPE_INSTANCE);
+   if (!pdev)
+      return vk_error(instance, VK_ERROR_OUT_OF_HOST_MEMORY);
+
+   struct vk_physical_device_dispatch_table dispatch_table;
+   vk_physical_device_dispatch_table_from_entrypoints(&dispatch_table, &radv_physical_device_entrypoints, true);
+   vk_physical_device_dispatch_table_from_entrypoints(&dispatch_table, &wsi_physical_device_entrypoints, false);
+
+   result = vk_physical_device_init(&pdev->vk, &instance->vk, NULL, NULL, NULL, &dispatch_table);
+   if (result != VK_SUCCESS) {
+      goto fail_alloc;
+   }
+
+   pdev->wsi_master_fd = -1;
+   pdev->wsi_syncobj_fd = -1;
+   simple_mtx_init(&pdev->drm_device_mtx, mtx_plain);
+
+   struct radeon_winsys_info winsys_info;
+   result = radv_wddm2_winsys_query_info(adapter, instance->debug_flags, &winsys_info);
+   if (result != VK_SUCCESS) {
+      result = vk_errorf(instance, result, "failed to query GPU info");
+      goto fail_base;
+   }
+
+   memcpy(&pdev->info, &winsys_info.base, sizeof(pdev->info));
+
+   pdev->vk.supported_sync_types = pdev->sync_types;
+   pdev->sync_types[0] = NULL;
+
+   if (!radv_is_gpu_supported(&pdev->info)) {
+      if (instance->debug_flags & RADV_DEBUG_STARTUP)
+         fprintf(stderr, "radv: info: device '%s' is not supported by RADV.\n", ac_get_family_name(pdev->info.family));
+      result = VK_ERROR_INCOMPATIBLE_DRIVER;
+      goto fail_base;
+   }
+
+   pdev->addrlib = ac_addrlib_create(&pdev->info, &pdev->info.max_alignment);
+   if (!pdev->addrlib) {
+      result = VK_ERROR_INITIALIZATION_FAILED;
+      goto fail_base;
+   }
+
+   pdev->use_llvm = instance->debug_flags & RADV_DEBUG_LLVM;
+#if !AMD_LLVM_AVAILABLE
+   if (pdev->use_llvm) {
+      fprintf(stderr, "ERROR: LLVM compiler backend selected for radv, but LLVM support was not "
+                      "enabled at build time.\n");
+      abort();
+   }
+#elif NDEBUG
+   if (pdev->use_llvm) {
+      fprintf(stderr, "ERROR: The LLVM compiler backend is only for debugging and not supported "
+                      "in release builds of RADV!\n");
+      pdev->use_llvm = false;
+   }
+#endif
+
+#if DETECT_OS_ANDROID
+   pdev->emulate_etc2 = !pdev->info.has_etc_support;
+   pdev->emulate_astc = true;
+#else
+   pdev->emulate_etc2 = !pdev->info.has_etc_support && instance->drirc.features.require_etc2;
+   pdev->emulate_astc = instance->drirc.features.require_astc;
+#endif
+
+   const char *name = ac_get_family_name(pdev->info.family);
+   snprintf(pdev->name, sizeof(pdev->name), "AMD RADV %s%s", name, radv_get_compiler_string(pdev));
+   snprintf(pdev->marketing_name, sizeof(pdev->name), "%s (RADV %s%s)", pdev->info.marketing_name, name,
+            radv_get_compiler_string(pdev));
+
+   if (pdev->info.gfx_level >= GFX12)
+      vk_warn_non_conformant_implementation("radv");
+
+   radv_get_driver_uuid(&pdev->driver_uuid);
+   radv_get_device_uuid(&pdev->info, &pdev->device_uuid);
+   radv_get_optimal_tiling_layout_uuid(pdev, &pdev->optimal_tiling_layout_uuid);
+
+   pdev->dcc_msaa_allowed = (instance->perftest_flags & RADV_PERFTEST_DCC_MSAA);
+
+   pdev->use_fmask = pdev->info.compiler_info.has_fmask && !(instance->debug_flags & RADV_DEBUG_NO_FMASK);
+
+   pdev->force_64_byte_sampled_image = !pdev->use_fmask && instance->drirc.debug.force_64_byte_sampled_image;
+
+   pdev->use_hiz = !(instance->debug_flags & RADV_DEBUG_NO_HIZ);
+
+   if (pdev->info.gfx_level == GFX12) {
+      const char *gfx12_hiz_wa_str = instance->drirc.performance.gfx12_hiz_wa;
+
+      pdev->gfx12_hiz_wa = RADV_GFX12_HIZ_WA_FULL;
+
+      if (strlen(gfx12_hiz_wa_str) > 0) {
+         if (!strcmp(gfx12_hiz_wa_str, "disabled")) {
+            pdev->gfx12_hiz_wa = RADV_GFX12_HIZ_WA_DISABLED;
+         } else if (!strcmp(gfx12_hiz_wa_str, "partial")) {
+            pdev->gfx12_hiz_wa = RADV_GFX12_HIZ_WA_PARTIAL;
+         } else if (!strcmp(gfx12_hiz_wa_str, "full")) {
+            pdev->gfx12_hiz_wa = RADV_GFX12_HIZ_WA_FULL;
+         } else {
+            fprintf(stderr, "radv: Invalid value found for radv_gfx12_hiz_wa. "
+                            "Accepted values are: disabled, partial or full.\n");
+         }
+      }
+   }
+
+   pdev->use_ngg = (pdev->info.gfx_level >= GFX10 && pdev->info.family != CHIP_NAVI14 &&
+                    !(instance->debug_flags & RADV_DEBUG_NO_NGG)) ||
+                   pdev->info.gfx_level >= GFX11;
+
+   pdev->use_ngg_culling = pdev->use_ngg && pdev->info.max_render_backends > 1 &&
+                           (pdev->info.gfx_level == GFX10_3 || pdev->info.gfx_level == GFX10 ||
+                            (instance->perftest_flags & RADV_PERFTEST_NGGC)) &&
+                           !(instance->debug_flags & RADV_DEBUG_NO_NGGC);
+
+   pdev->emulate_ngg_gs_query_pipeline_stat = pdev->use_ngg && pdev->info.gfx_level < GFX11;
+
+   pdev->emulate_mesh_shader_queries = pdev->info.gfx_level == GFX10_3;
+
+   pdev->load_grid_size_from_user_sgpr = pdev->info.gfx_level >= GFX10_3;
+
+   pdev->cs_wave_size = 64;
+   pdev->ps_wave_size = 64;
+   pdev->ge_wave_size = 64;
+   pdev->rt_wave_size = 64;
+
+   if (pdev->info.gfx_level >= GFX10) {
+      if (instance->perftest_flags & RADV_PERFTEST_CS_WAVE_32)
+         pdev->cs_wave_size = 32;
+
+      if (instance->perftest_flags & RADV_PERFTEST_PS_WAVE_32)
+         pdev->ps_wave_size = 32;
+
+      if (instance->perftest_flags & RADV_PERFTEST_GE_WAVE_32)
+         pdev->ge_wave_size = 32;
+
+      if (radv_is_rt_wave64_enabled(instance))
+         pdev->rt_wave_size = 64;
+      else
+         pdev->rt_wave_size = 32;
+   }
+
+   radv_probe_video_decode(pdev);
+   radv_probe_video_encode(pdev);
+
+   radv_physical_device_init_mem_types(pdev);
+
+   radv_physical_device_get_supported_extensions(pdev, &pdev->vk.supported_extensions);
+   radv_physical_device_get_features(pdev, &pdev->vk.supported_features);
+
+   radv_physical_device_init_queue_table(pdev);
+
+   if (radv_device_get_cache_uuid(pdev, pdev->cache_uuid)) {
+      result = vk_errorf(instance, VK_ERROR_INITIALIZATION_FAILED, "cannot generate UUID");
+      goto fail_addrlib;
+   }
+
+   char buf[VK_UUID_SIZE * 2 + 1];
+   mesa_bytes_to_hex(buf, pdev->cache_uuid, VK_UUID_SIZE);
+   pdev->vk.disk_cache = disk_cache_create("RADV", buf, 0);
+
+   pdev->disk_cache_meta =
+      disk_cache_create_custom("RADV", buf, 0, "radv_builtin_shaders", 1024 * 1024 * 32 /* 32MiB */);
+
+   radv_get_physical_device_properties(pdev);
+
+   radv_init_physical_device_decoder(pdev);
+   radv_init_physical_device_encoder(pdev);
+
+   ac_init_perfcounters(&pdev->info, false, false, &pdev->ac_perfcounters);
+
+   result = radv_init_wsi(pdev);
+   if (result != VK_SUCCESS) {
+      vk_error(instance, result);
+      goto fail_perfcounters;
+   }
+
+   pdev->gs_table_depth = ac_get_gs_table_depth(pdev->info.gfx_level, pdev->info.family);
+
+   ac_get_task_info(&pdev->info, &pdev->task_info);
+   radv_get_binning_settings(pdev, &pdev->binning_settings);
+
+   if (pdev->info.has_distributed_tess) {
+      if (pdev->info.family == CHIP_FIJI || pdev->info.family >= CHIP_POLARIS10)
+         pdev->tess_distribution_mode = V_028B6C_TRAPEZOIDS;
+      else
+         pdev->tess_distribution_mode = V_028B6C_DONUTS;
+   } else {
+      pdev->tess_distribution_mode = V_028B6C_NO_DIST;
+   }
+
+   *out = &pdev->vk;
+
+   return VK_SUCCESS;
+
+fail_perfcounters:
+   ac_destroy_perfcounters(&pdev->ac_perfcounters);
+   disk_cache_destroy(pdev->vk.disk_cache);
+   disk_cache_destroy(pdev->disk_cache_meta);
+fail_addrlib:
+   if (pdev->addrlib)
+      ac_addrlib_destroy(pdev->addrlib);
+fail_base:
+   vk_physical_device_finish(&pdev->vk);
+fail_alloc:
+   vk_free(&instance->vk.alloc, pdev);
+   return result;
+}
+#endif
+
 void
 radv_physical_device_destroy(struct vk_physical_device *vk_device)
 {
@@ -3160,6 +3379,7 @@ radv_GetPhysicalDeviceQueueFamilyProperties2(VkPhysicalDevice physicalDevice, ui
 }
 
 #ifdef _WIN32
+#ifndef RADV_AMDGPU_WINSYS_PUBLIC_H
 struct radeon_winsys_heap_info {
    uint64_t allocated_vram;
    uint64_t vram_usage;
@@ -3168,6 +3388,7 @@ struct radeon_winsys_heap_info {
    uint64_t allocated_gtt;
    uint64_t gtt_usage;
 };
+#endif
 
 static void
 radv_query_heap_info(struct radv_physical_device *pdev, struct radeon_winsys_heap_info *heap_info)

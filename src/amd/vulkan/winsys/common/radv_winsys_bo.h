@@ -25,7 +25,7 @@
 #define RADV_WINSYS_BO_H
 
 #include "radv_radeon_winsys.h"
-#include "radv_debug.h"
+#include "tools/radv_debug.h"
 
 #include "util/list.h"
 #include "util/os_time.h"

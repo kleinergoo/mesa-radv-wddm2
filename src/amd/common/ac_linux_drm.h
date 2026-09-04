@@ -198,6 +198,11 @@ struct drm_amdgpu_info_hw_ip {
    uint32_t ip_discovery_version;
 };
 
+struct drm_amdgpu_info_firmware {
+   uint32_t ver;
+   uint32_t feature;
+};
+
 struct drm_amdgpu_info_uq_metadata_gfx {
    /* shadow area size for gfx11 */
    uint32_t shadow_size;

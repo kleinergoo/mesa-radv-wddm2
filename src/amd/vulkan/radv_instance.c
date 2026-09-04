@@ -351,6 +351,9 @@ radv_CreateInstance(const VkInstanceCreateInfo *pCreateInfo, const VkAllocationC
    }
 
    instance->vk.physical_devices.try_create_for_drm = create_drm_physical_device;
+#ifdef HAVE_VULKAN_DX
+   instance->vk.physical_devices.try_create_for_dx = create_dx_physical_device;
+#endif
    instance->vk.physical_devices.destroy = radv_physical_device_destroy;
 
    if (instance->debug_flags & RADV_DEBUG_STARTUP)

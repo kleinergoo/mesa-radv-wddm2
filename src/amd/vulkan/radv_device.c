@@ -34,6 +34,10 @@
 #ifndef _WIN32
 #include "winsys/amdgpu/radv_amdgpu_winsys_public.h"
 #endif
+#ifdef HAVE_VULKAN_DX
+#include "winsys/wddm2/radv_wddm2_winsys_public.h"
+#include "vk_dx_adapter_info.h"
+#endif
 #include "util/mesa-blake3.h"
 #include "util/u_atomic.h"
 #include "util/u_process.h"
@@ -1304,7 +1308,25 @@ static VkResult
 radv_create_winsys(struct radv_device *device)
 {
 #ifdef _WIN32
+#ifdef HAVE_VULKAN_DX
+   const struct radv_physical_device *pdev = radv_device_physical(device);
+   const struct radv_instance *instance = radv_physical_device_instance(pdev);
+
+   LUID adapter_luid;
+   memcpy(&adapter_luid, pdev->info.luid, sizeof(adapter_luid));
+
+   struct vk_dx_adapter_info adapter_info = {
+      .adapter_luid = adapter_luid,
+      .vendor_id = ATI_VENDOR_ID,
+      .physical_adapter_index = 0,
+   };
+
+   return radv_wddm2_winsys_create(&adapter_info, &pdev->info,
+                                   instance->debug_flags, instance->perftest_flags,
+                                   &device->ws);
+#else
    return VK_ERROR_INCOMPATIBLE_DRIVER;
+#endif
 #else
    const struct radv_physical_device *pdev = radv_device_physical(device);
    const struct radv_instance *instance = radv_physical_device_instance(pdev);

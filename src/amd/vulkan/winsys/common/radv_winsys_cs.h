@@ -105,7 +105,7 @@ radv_winsys_cs_bo_create(struct radv_winsys_cs *cs, uint32_t ib_size)
                                      RADEON_FLAG_READ_ONLY | RADEON_FLAG_GL2_BYPASS | gtt_wc_flag;
 
    return cs->ws->buffer_create(cs->ws, ib_size, info->ip[cs->hw_ip].ib_alignment, domain, flags,
-                                RADV_BO_PRIORITY_CS, 0, NULL, &cs->ib_buffer);
+                                RADV_BO_PRIORITY_CS, 0, &cs->ib_buffer);
 }
 
 static VkResult

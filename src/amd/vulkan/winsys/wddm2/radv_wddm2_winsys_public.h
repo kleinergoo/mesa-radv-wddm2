@@ -29,13 +29,24 @@
 #define RADV_WDDM2_WINSYS_PUBLIC_H
 
 #include <vulkan/vulkan_core.h>
+#include "ac_gpu_info.h"
+#include "vk_sync.h"
 
 struct radeon_winsys;
-struct vk_sync_type;
 struct vk_dx_adapter_info;
 
+struct radeon_winsys_info {
+   struct radeon_info base;
+   struct vk_sync_type syncobj_sync_type;
+   uint32_t global_priority_mask;
+};
+
+VkResult radv_wddm2_winsys_query_info(const struct vk_dx_adapter_info *adapter_info,
+                                      uint64_t debug_flags, struct radeon_winsys_info *info);
+
 VkResult radv_wddm2_winsys_create(const struct vk_dx_adapter_info *adapter_info,
-                                  uint64_t debug_flags, struct radeon_winsys **winsys);
+                                  const struct radeon_info *info, uint64_t debug_flags,
+                                  uint64_t perftest_flags, struct radeon_winsys **winsys);
 
 const struct vk_sync_type *const *
 radv_wddm2_winsys_get_sync_types(struct radeon_winsys *ws);

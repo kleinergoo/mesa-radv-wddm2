@@ -35,14 +35,15 @@
 
 #include "radv_wddm2_winsys.h"
 
+#include "radv_wddm2_winsys_public.h"
 #include "util/macros.h"
+#include "util/u_memory.h"
 #include "util/u_string.h"
 #include "ac_surface.h"
-#include "radv_debug.h"
+#include "tools/radv_debug.h"
 #include "radv_wddm2_bo.h"
 #include "radv_wddm2_cs.h"
 #include "radv_wddm2_wsi.h"
-#include "radv_wddm2_winsys_public.h"
 #include "vk_dxcore.h"
 #include "vk_instance.h"
 #include "vk_sync_dummy.h"
@@ -146,6 +147,179 @@ kmd_to_amdgpu_vram_type(uint32_t kmd_type)
       fprintf(stderr, "Unknown KMD VRAM type: %u\n", kmd_type);
       return AMDGPU_VRAM_TYPE_UNKNOWN;
    }
+}
+
+static void
+radv_wddm2_fill_default_max_submitted_ibs(struct radeon_info *info)
+{
+   /* When the number of IBs can't be queried from the kernel, we choose a
+    * rough estimate that should work well (as of kernel 6.3).
+    */
+   for (unsigned i = 0; i < AMD_NUM_IP_TYPES; ++i)
+      info->max_submitted_ibs[i] = 50;
+
+   info->max_submitted_ibs[AMD_IP_GFX] = info->gfx_level >= GFX7 ? 192 : 144;
+   info->max_submitted_ibs[AMD_IP_COMPUTE] = 124;
+   info->max_submitted_ibs[AMD_IP_VCN_JPEG] = 16;
+   for (unsigned i = 0; i < AMD_NUM_IP_TYPES; ++i) {
+      /* Clear out max submitted IB count for IPs that have no queues. */
+      if (!info->ip[i].num_queues)
+         info->max_submitted_ibs[i] = 0;
+   }
+}
+
+static void
+radv_wddm2_fill_attribute_ring_info(struct radeon_info *info)
+{
+   if (info->gfx_level >= GFX11) {
+      unsigned num_prim_exports = 0, num_pos_exports = 0;
+
+      if (info->gfx_level >= GFX12) {
+         info->attribute_ring_size_per_se = 1400 * 1024;
+         num_prim_exports = 16368; /* also includes gs_alloc_req */
+         num_pos_exports = 16384;
+      } else if (info->l3_cache_size_mb) {
+         info->attribute_ring_size_per_se = 1400 * 1024;
+      } else {
+         assert(info->num_se == 1);
+
+         if (info->l2_cache_size >= 2 * 1024 * 1024)
+            info->attribute_ring_size_per_se = 768 * 1024;
+         else
+            info->attribute_ring_size_per_se = info->l2_cache_size / 2;
+      }
+
+      /* The size must be aligned to 64K per SE and must be at most 16M in total. */
+      info->attribute_ring_size_per_se = align(info->attribute_ring_size_per_se, 64 * 1024);
+      assert(info->attribute_ring_size_per_se * info->max_se <= 16 * 1024 * 1024);
+
+      /* Compute the pos and prim ring sizes and offsets. */
+      info->pos_ring_size_per_se = align(num_pos_exports * 16, 32);
+      info->prim_ring_size_per_se = align(num_prim_exports * 4, 32);
+      assert(info->gfx_level >= GFX12 ||
+             (!info->pos_ring_size_per_se && !info->prim_ring_size_per_se));
+
+      uint32_t max_se_squared = info->max_se * info->max_se;
+      uint32_t attribute_ring_size = info->attribute_ring_size_per_se * info->max_se;
+      uint32_t pos_ring_size = align(info->pos_ring_size_per_se * max_se_squared, 64 * 1024);
+      uint32_t prim_ring_size = align(info->prim_ring_size_per_se * max_se_squared, 64 * 1024);
+
+      info->pos_ring_offset = attribute_ring_size;
+      info->prim_ring_offset = info->pos_ring_offset + pos_ring_size;
+      info->total_attribute_pos_prim_ring_size = info->prim_ring_offset + prim_ring_size;
+   }
+}
+
+static void
+radv_wddm2_fill_scratch_info(struct radeon_info *info)
+{
+   /* Compute the scratch WAVESIZE granularity in bytes. */
+   info->scratch_wavesize_granularity_shift = info->gfx_level >= GFX11 ? 8 : 10;
+   info->scratch_wavesize_granularity = BITFIELD_BIT(info->scratch_wavesize_granularity_shift);
+
+   /* The maximum number of scratch waves. The number is only a function of the number of CUs.
+    * It should be large enough to hold at least 1 threadgroup. Use the minimum per-SA CU count.
+    *
+    * We can decrease the number to make it fit into the infinity cache.
+    */
+   const unsigned max_waves_per_tg = 32; /* 1024 threads in Wave32 */
+   info->max_scratch_waves = MAX2(32 * info->max_good_cu_per_sa * info->max_sa_per_se * info->num_se,
+                                  max_waves_per_tg);
+   info->has_scratch_base_registers = info->gfx_level >= GFX11 ||
+                                      (!info->has_graphics && info->family >= CHIP_GFX940);
+}
+
+static void
+radv_wddm2_fill_raster_config(struct radeon_info *info)
+{
+   unsigned raster_config, raster_config_1, se_tile_repeat;
+
+   if (info->gfx_level >= GFX9) {
+      info->se_tile_repeat = 32 * info->max_se;
+      return;
+   }
+
+   switch (info->family) {
+   /* 1 SE / 1 RB */
+   case CHIP_HAINAN:
+   case CHIP_KABINI:
+   case CHIP_STONEY:
+      raster_config = 0x00000000;
+      raster_config_1 = 0x00000000;
+      break;
+   /* 1 SE / 4 RBs */
+   case CHIP_VERDE:
+      raster_config = 0x0000124a;
+      raster_config_1 = 0x00000000;
+      break;
+   /* 1 SE / 2 RBs (Oland is special) */
+   case CHIP_OLAND:
+      raster_config = 0x00000082;
+      raster_config_1 = 0x00000000;
+      break;
+   /* 1 SE / 2 RBs */
+   case CHIP_KAVERI:
+   case CHIP_ICELAND:
+   case CHIP_CARRIZO:
+      raster_config = 0x00000002;
+      raster_config_1 = 0x00000000;
+      break;
+   /* 2 SEs / 4 RBs */
+   case CHIP_BONAIRE:
+   case CHIP_POLARIS11:
+   case CHIP_POLARIS12:
+      raster_config = 0x16000012;
+      raster_config_1 = 0x00000000;
+      break;
+   /* 2 SEs / 8 RBs */
+   case CHIP_TAHITI:
+   case CHIP_PITCAIRN:
+      raster_config = 0x2a00126a;
+      raster_config_1 = 0x00000000;
+      break;
+   /* 4 SEs / 8 RBs */
+   case CHIP_TONGA:
+   case CHIP_POLARIS10:
+      raster_config = 0x16000012;
+      raster_config_1 = 0x0000002a;
+      break;
+   /* 4 SEs / 16 RBs */
+   case CHIP_HAWAII:
+   case CHIP_FIJI:
+   case CHIP_VEGAM:
+      raster_config = 0x3a00161a;
+      raster_config_1 = 0x0000002e;
+      break;
+   default:
+      fprintf(stderr, "ac: Unknown GPU, using 0 for raster_config\n");
+      raster_config = 0x00000000;
+      raster_config_1 = 0x00000000;
+      break;
+   }
+
+   /* drm/radeon on Kaveri is buggy, so disable 1 RB to work around it.
+    * This decreases performance by up to 50% when the RB is the bottleneck.
+    */
+   if (info->family == CHIP_KAVERI && !info->is_amdgpu)
+      raster_config = 0x00000000;
+
+   /* Fiji: Old kernels have incorrect tiling config. This decreases
+    * RB performance by 25%. (it disables 1 RB in the second packer)
+    */
+   if (info->family == CHIP_FIJI && info->cik_macrotile_mode_array[0] == 0x000000e8) {
+      raster_config = 0x16000012;
+      raster_config_1 = 0x0000002a;
+   }
+
+   unsigned se_width = 8 << G_028350_SE_XSEL_GFX6(raster_config);
+   unsigned se_height = 8 << G_028350_SE_YSEL_GFX6(raster_config);
+
+   /* I don't know how to calculate this, though this is probably a good guess. */
+   se_tile_repeat = MAX2(se_width, se_height) * info->max_se;
+
+   info->pa_sc_raster_config = raster_config;
+   info->pa_sc_raster_config_1 = raster_config_1;
+   info->se_tile_repeat = se_tile_repeat;
 }
 
 static NTSTATUS
@@ -547,12 +721,15 @@ radv_wddm2_fill_gpu_info(struct radv_wddm2_winsys *ws,
    ac_fill_feature_info(info, &dev);
    ac_fill_bug_info(info);
    ac_fill_tess_info(info);
-   ac_fill_compiler_info(info, &dev);
-   ac_get_default_max_submitted_ibs(info);
-   ac_fill_attribute_ring_info(info);
+
+   /* 26.2.2 folds the following into the DRM-specific ac_query_gpu_info master.
+    * The wddm2 winsys can't use that, so replicate the fold as local statics. */
+   ac_fill_compiler_info(info, &dev, false);
+   radv_wddm2_fill_default_max_submitted_ibs(info);
+   radv_wddm2_fill_attribute_ring_info(info);
    //set_custom_cu_en_mask(info);
-   ac_fill_raster_config(info);
-   ac_fill_scratch_info(info);
+   radv_wddm2_fill_raster_config(info);
+   radv_wddm2_fill_scratch_info(info);
 
    info->compiler_info.has_image_bvh_intersect_ray = false;
 
@@ -769,8 +946,56 @@ radv_wddm2_winsys_query_gpuvm_fault(struct radeon_winsys *rws, struct radv_winsy
 }
 
 VkResult
+radv_wddm2_winsys_query_info(const struct vk_dx_adapter_info *adapter_info,
+                             uint64_t debug_flags, struct radeon_winsys_info *info)
+{
+   VkResult result = VK_SUCCESS;
+   NTSTATUS status;
+
+   memset(info, 0, sizeof(*info));
+
+   struct radv_wddm2_winsys tmp_ws;
+   memset(&tmp_ws, 0, sizeof(tmp_ws));
+   tmp_ws.debug_all_bos = !!(debug_flags & RADV_DEBUG_ALL_BOS);
+
+   D3DKMT_OPENADAPTERFROMLUID open_adapter = {
+      .AdapterLuid = adapter_info->adapter_luid,
+   };
+   status = WDDM2_DISPATCH(OpenAdapterFromLuid(&open_adapter));
+   if (!NT_SUCCESS(status))
+      return VK_ERROR_INITIALIZATION_FAILED;
+
+   tmp_ws.adapter_h = open_adapter.hAdapter;
+
+   status = radv_wddm2_fill_gpu_info(&tmp_ws, adapter_info);
+   if (!NT_SUCCESS(status)) {
+      result = VK_ERROR_INITIALIZATION_FAILED;
+      goto close_adapter;
+   }
+
+   status = radv_wddm2_query_marketing_name(&tmp_ws, tmp_ws.gpu_info.marketing_name,
+                                             sizeof(tmp_ws.gpu_info.marketing_name));
+   if (!NT_SUCCESS(status)) {
+      result = VK_ERROR_INITIALIZATION_FAILED;
+      goto close_adapter;
+   }
+
+   info->base = tmp_ws.gpu_info;
+
+close_adapter:
+   {
+      D3DKMT_CLOSEADAPTER close_adapter = {
+         .hAdapter = tmp_ws.adapter_h,
+      };
+      WDDM2_DISPATCH(CloseAdapter(&close_adapter));
+   }
+   return result;
+}
+
+VkResult
 radv_wddm2_winsys_create(const struct vk_dx_adapter_info *adapter_info,
-                         uint64_t debug_flags, struct radeon_winsys **winsys)
+                          const struct radeon_info *info, uint64_t debug_flags,
+                          uint64_t perftest_flags, struct radeon_winsys **winsys)
 {
    VkResult result = VK_SUCCESS;
    struct radv_wddm2_winsys *ws = NULL;
@@ -832,20 +1057,7 @@ radv_wddm2_winsys_create(const struct vk_dx_adapter_info *adapter_info,
 
    ws->adapter_h = open_adapter.hAdapter;
 
-   status = radv_wddm2_fill_gpu_info(ws, adapter_info);
-   if (!NT_SUCCESS(status)) {
-      fprintf(stderr, "Can't fill info for luid %X%X\n", adapter_info->adapter_luid.LowPart, adapter_info->adapter_luid.HighPart);
-      result = VK_ERROR_INITIALIZATION_FAILED;
-      goto error_open_adapter;
-   }
-
-   status = radv_wddm2_query_marketing_name(ws, ws->gpu_info.marketing_name,
-                                            sizeof(ws->gpu_info.marketing_name));
-   if (!NT_SUCCESS(status)) {
-      fprintf(stderr, "Can't query marketing name\n");
-      result = VK_ERROR_INITIALIZATION_FAILED;
-      goto error_open_adapter;
-   }
+   ws->gpu_info = *info;
 
    D3DKMT_CREATEDEVICE create_device = {
       .hAdapter = ws->adapter_h,

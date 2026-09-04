@@ -33,6 +33,7 @@
 #endif
 
 typedef struct ac_drm_device ac_drm_device;
+struct vk_dx_adapter_info;
 
 struct radv_binning_settings {
    unsigned context_states_per_bin;    /* allowed range: [1, 6] */
@@ -274,6 +275,12 @@ bool radv_are_dcc_mips_disabled(const struct radv_physical_device *pdev);
 
 VkResult create_drm_physical_device(struct vk_instance *vk_instance, struct _drmDevice *device,
                                     struct vk_physical_device **out);
+
+#ifdef HAVE_VULKAN_DX
+VkResult create_dx_physical_device(struct vk_instance *vk_instance,
+                                   const struct vk_dx_adapter_info *adapter,
+                                   void *unk_adapter, struct vk_physical_device **out);
+#endif
 
 void radv_physical_device_destroy(struct vk_physical_device *vk_pdev);
 

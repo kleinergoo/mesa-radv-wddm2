@@ -334,6 +334,9 @@ failed:
 }
 
 static VkResult
+radv_wddm2_ctx_is_priority_permitted(struct radeon_winsys *_ws, enum radeon_ctx_priority priority);
+
+static VkResult
 radv_wddm2_ctx_create(struct radeon_winsys *_ws, enum radeon_ctx_priority priority,
                       struct radeon_winsys_ctx **rctx)
 {
