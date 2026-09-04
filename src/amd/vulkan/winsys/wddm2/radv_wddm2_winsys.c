@@ -957,6 +957,7 @@ radv_wddm2_winsys_query_info(const struct vk_dx_adapter_info *adapter_info,
    struct radv_wddm2_winsys tmp_ws;
    memset(&tmp_ws, 0, sizeof(tmp_ws));
    tmp_ws.debug_all_bos = !!(debug_flags & RADV_DEBUG_ALL_BOS);
+   tmp_ws.adapter_luid = adapter_info->adapter_luid;
 
    D3DKMT_OPENADAPTERFROMLUID open_adapter = {
       .AdapterLuid = adapter_info->adapter_luid,

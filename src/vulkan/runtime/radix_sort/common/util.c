@@ -74,7 +74,7 @@ msb_idx_u32(uint32_t n)
 
   return index;
 
-#elif defined(__GNUC__)
+#elif defined(__GNUC__) || defined(__clang__)
 
   return __builtin_clz(n) ^ 31;
 

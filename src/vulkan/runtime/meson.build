@@ -266,7 +266,7 @@ idep_vulkan_lite_runtime_headers = declare_dependency(
     vk_common_entrypoints[0],
     vk_physical_device_features[1],
     vk_physical_device_properties[1],
-    vk_wddm2_dispatch_table,
+    vk_wddm2_dispatch_table[0],
   ],
   include_directories : include_directories('.'),
 )
