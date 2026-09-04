@@ -340,7 +340,7 @@ radv_wddm2_ctx_create(struct radeon_winsys *_ws, enum radeon_ctx_priority priori
    VkResult result;
    struct radv_wddm2_winsys *ws = radv_wddm2_winsys(_ws);
 
-   if (_ws->ctx_is_priority_permitted(_ws, priority) != VK_SUCCESS)
+   if (radv_wddm2_ctx_is_priority_permitted(_ws, priority) != VK_SUCCESS)
       return VK_ERROR_NOT_PERMITTED;
 
    struct radv_wddm2_ctx *ctx = CALLOC_STRUCT(radv_wddm2_ctx);
@@ -353,6 +353,9 @@ radv_wddm2_ctx_create(struct radeon_winsys *_ws, enum radeon_ctx_priority priori
       if (result != VK_SUCCESS)
          goto fail_contexts;
    }
+
+   if (!ws->default_ctx)
+      ws->default_ctx = ctx;
 
    *rctx = (struct radeon_winsys_ctx *)ctx;
    return VK_SUCCESS;
@@ -383,6 +386,12 @@ radv_wddm2_ctx_is_priority_permitted(struct radeon_winsys *_ws, enum radeon_ctx_
    if (priority >= RADEON_CTX_PRIORITY_LOW && priority <= RADEON_CTX_PRIORITY_HIGH)
       return VK_SUCCESS;
    return VK_ERROR_NOT_PERMITTED;
+}
+
+static int
+radv_wddm2_ctx_set_pstate(struct radeon_winsys_ctx *rwctx, uint32_t pstate)
+{
+   return 0;
 }
 
 static bool
@@ -545,37 +554,6 @@ radv_wddm2_cs_execute_secondary(struct ac_cmdbuf *_parent, struct ac_cmdbuf *_ch
                                 bool allow_ib2)
 {
    radv_winsys_cs_execute_secondary(radv_winsys_cs(_parent), radv_winsys_cs(_child), allow_ib2);
-}
-
-static void
-radv_wddm2_get_cpu_addr(void *_cs, uint64_t addr, struct ac_addr_info *info)
-{
-   struct radv_wddm2_cs *cs = radv_wddm2_cs(_cs);
-   struct radv_wddm2_winsys *ws = radv_wddm2_winsys(cs->base.ws);
-
-   memset(info, 0, sizeof(struct ac_addr_info));
-
-   if (ws->debug_log_bos) {
-      bool destroyed = false;
-
-      if (radv_winsys_bo_log_find(&ws->bo_log, addr, &destroyed))
-         info->use_after_free = destroyed;
-   }
-
-   if (info->use_after_free)
-      return;
-
-   info->valid = !ws->debug_all_bos;
-
-   if (radv_winsys_cs_get_cpu_addr(&cs->base, addr, &info->cpu_addr)) {
-      info->valid = true;
-      return;
-   }
-
-   if (radv_winsys_bo_list_get_cpu_addr(&ws->global_bo_list, &ws->base, addr, &info->cpu_addr)) {
-      info->valid = true;
-      return;
-   }
 }
 
 #define WRITE_STRUCT(pdd, type, item) \
@@ -891,7 +869,7 @@ radv_wddm2_cs_init_functions(struct radv_wddm2_winsys *ws)
 {
    ws->base.ctx_create = radv_wddm2_ctx_create;
    ws->base.ctx_destroy = radv_wddm2_ctx_destroy;
-   ws->base.ctx_is_priority_permitted = radv_wddm2_ctx_is_priority_permitted;
+   ws->base.ctx_set_pstate = radv_wddm2_ctx_set_pstate;
    ws->base.ctx_wait_idle = radv_wddm2_ctx_wait_idle;
    ws->base.cs_domain = radv_wddm2_cs_domain;
    ws->base.cs_create = radv_wddm2_cs_create;
@@ -907,7 +885,6 @@ radv_wddm2_cs_init_functions(struct radv_wddm2_winsys *ws)
    ws->base.cs_execute_ib = radv_winsys_cs_execute_ib;
    ws->base.cs_chain_dgc_ib = radv_winsys_cs_chain_dgc_ib;
    ws->base.cs_dump = radv_winsys_cs_dump;
-   ws->base.cs_get_cpu_addr = radv_wddm2_get_cpu_addr;
    ws->base.cs_annotate = radv_winsys_cs_annotate;
    ws->base.cs_pad = radv_winsys_cs_pad;
 }

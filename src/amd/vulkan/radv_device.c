@@ -1503,6 +1503,9 @@ radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCr
 
    device->vk.sync = device->ws->get_sync_provider(device->ws);
 
+   if (device->ws->get_wddm2_handle)
+      vk_device_set_wddm2_handle(&device->vk, device->ws->get_wddm2_handle(device->ws));
+
    /* Disable unordered submits when SQTT queue events are enabled because queue present events
     * might be missing otherwise.
     */

@@ -72,7 +72,7 @@ radv_winsys_cs_destroy(struct radv_winsys_cs *cs)
 static enum radeon_bo_domain
 radv_winsys_cs_domain(struct radeon_winsys *ws)
 {
-   struct radeon_info *info = ws->query_info(ws);
+   struct radeon_info *info = ws->gpu_info;
 
    uint64_t allocated_vram_vis = ws->query_value(ws, RADEON_ALLOCATED_VRAM_VIS);
    bool enough_vram = info->all_vram_visible ||
@@ -93,7 +93,7 @@ radv_winsys_cs_domain(struct radeon_winsys *ws)
 static VkResult
 radv_winsys_cs_bo_create(struct radv_winsys_cs *cs, uint32_t ib_size)
 {
-   struct radeon_info *info = cs->ws->query_info(cs->ws);
+   struct radeon_info *info = cs->ws->gpu_info;
 
    /* Avoid memcpy from VRAM when a secondary cmdbuf can't always rely on IB2. */
    const bool can_always_use_ib2 = info->gfx_level >= GFX8 && cs->hw_ip == AMD_IP_GFX;
@@ -141,7 +141,7 @@ radv_winsys_cs_get_new_ib(struct radv_winsys_cs *cs, uint32_t ib_size)
 static unsigned
 radv_winsys_cs_get_initial_size(struct radeon_winsys *ws, enum amd_ip_type ip_type)
 {
-   struct radeon_info *info = ws->query_info(ws);
+   struct radeon_info *info = ws->gpu_info;
 
    const uint32_t ib_alignment = info->ip[ip_type].ib_alignment;
    assert(util_is_power_of_two_nonzero(ib_alignment));
@@ -152,7 +152,7 @@ static VkResult
 radv_winsys_cs_init(struct radv_winsys_cs *cs, struct radeon_winsys *ws, enum amd_ip_type ip_type,
                       bool is_secondary, bool chain_ib)
 {
-   struct radeon_info *info = ws->query_info(ws);
+   struct radeon_info *info = ws->gpu_info;
    uint32_t ib_size = radv_winsys_cs_get_initial_size(ws, ip_type);
 
    cs->ws = ws;
@@ -178,7 +178,7 @@ radv_winsys_cs_init(struct radv_winsys_cs *cs, struct radeon_winsys *ws, enum am
 static uint32_t
 radv_winsys_cs_get_nop_packet(struct radv_winsys_cs *cs)
 {
-   struct radeon_info *info = cs->ws->query_info(cs->ws);
+   struct radeon_info *info = cs->ws->gpu_info;
 
    switch (cs->hw_ip) {
    case AMD_IP_GFX:
@@ -211,7 +211,7 @@ radv_winsys_cs_get_nop_packet(struct radv_winsys_cs *cs)
 static void
 radv_winsys_cs_emit_pkt3_nop(struct radv_winsys_cs *cs, const unsigned num_dw)
 {
-   struct radeon_info *info = cs->ws->query_info(cs->ws);
+   struct radeon_info *info = cs->ws->gpu_info;
 
    assert(num_dw >= (info->gfx_ib_pad_with_type2 ? 2 : 1));
 
@@ -248,7 +248,7 @@ static void
 radv_winsys_cs_pad(struct ac_cmdbuf *_cs, unsigned leave_dw_space)
 {
    struct radv_winsys_cs *cs = radv_winsys_cs(_cs);
-   struct radeon_info *info = cs->ws->query_info(cs->ws);
+   struct radeon_info *info = cs->ws->gpu_info;
    const enum amd_ip_type ip_type = cs->hw_ip;
 
    /* Don't pad on VCN encode/unified as no NOPs */
@@ -333,7 +333,7 @@ static void
 radv_winsys_cs_grow(struct ac_cmdbuf *_cs, size_t min_size)
 {
    struct radv_winsys_cs *cs = radv_winsys_cs(_cs);
-   struct radeon_info *info = cs->ws->query_info(cs->ws);
+   struct radeon_info *info = cs->ws->gpu_info;
 
    if (cs->status != VK_SUCCESS) {
       cs->base.cdw = 0;
@@ -541,7 +541,7 @@ radv_winsys_cs_execute_ib(struct ac_cmdbuf *_cs, struct radeon_winsys_bo *bo, ui
                           const bool predicate)
 {
    struct radv_winsys_cs *cs = radv_winsys_cs(_cs);
-   struct radeon_info *info = cs->ws->query_info(cs->ws);
+   struct radeon_info *info = cs->ws->gpu_info;
    const uint64_t ib_va = bo ? bo->va : va;
 
    if (cs->status != VK_SUCCESS)
@@ -557,7 +557,7 @@ static void
 radv_winsys_cs_chain_dgc_ib(struct ac_cmdbuf *_cs, uint64_t va, uint32_t cdw, uint64_t trailer_va, const bool predicate)
 {
    struct radv_winsys_cs *cs = radv_winsys_cs(_cs);
-   struct radeon_info *info = cs->ws->query_info(cs->ws);
+   struct radeon_info *info = cs->ws->gpu_info;
 
    if (cs->status != VK_SUCCESS)
       return;
@@ -664,20 +664,32 @@ radv_winsys_get_dump_ibs_str(enum radv_cs_dump_type type)
    }
 }
 
+/* addr callback for the CS dump parser that resolves addresses against the
+ * CS's own IB buffers (the 26.2.2 radeon_winsys has no cs_get_cpu_addr
+ * interface member; the backend's global BO list is not consulted here). */
+static void
+radv_winsys_cs_dump_addr_callback(void *data, uint64_t addr, struct ac_addr_info *info)
+{
+   struct radv_winsys_cs *cs = (struct radv_winsys_cs *)data;
+
+   if (radv_winsys_cs_get_cpu_addr(cs, addr, &info->cpu_addr))
+      info->valid = true;
+}
+
 static void
 radv_winsys_cs_dump(struct ac_cmdbuf *_cs, FILE *file, const int *trace_ids, int trace_id_count,
-                     enum radv_cs_dump_type type)
+                    enum radv_cs_dump_type type)
 {
    struct radv_winsys_cs *cs = (struct radv_winsys_cs *)_cs;
    struct radeon_winsys *ws = cs->ws;
-   struct radeon_info *info = cs->ws->query_info(cs->ws);
+   struct radeon_info *info = cs->ws->gpu_info;
    const bool dump_ibs = type == RADV_CS_DUMP_TYPE_PREAMBLE_IBS || type == RADV_CS_DUMP_TYPE_MAIN_IBS ||
                          type == RADV_CS_DUMP_TYPE_POSTAMBLE_IBS;
    const bool dump_ctx_rolls = type == RADV_CS_DUMP_TYPE_CTX_ROLLS;
 
    if (cs->chain_ib) {
       struct ac_addr_info addr_info;
-      ws->cs_get_cpu_addr(cs, cs->ib_buffers[0].va, &addr_info);
+      radv_winsys_cs_dump_addr_callback(cs, cs->ib_buffers[0].va, &addr_info);
       assert(addr_info.cpu_addr);
 
       if (dump_ibs) {
@@ -691,7 +703,7 @@ radv_winsys_cs_dump(struct ac_cmdbuf *_cs, FILE *file, const int *trace_ids, int
             .vcn_version = info->vcn_ip_version,
             .family = info->family,
             .ip_type = cs->hw_ip,
-            .addr_callback = ws->cs_get_cpu_addr,
+            .addr_callback = radv_winsys_cs_dump_addr_callback,
             .addr_callback_data = cs,
             .annotations = cs->annotations,
          };
@@ -734,7 +746,7 @@ radv_winsys_cs_dump(struct ac_cmdbuf *_cs, FILE *file, const int *trace_ids, int
                .vcn_version = info->vcn_ip_version,
                .family = info->family,
                .ip_type = cs->hw_ip,
-               .addr_callback = ws->cs_get_cpu_addr,
+               .addr_callback = radv_winsys_cs_dump_addr_callback,
                .addr_callback_data = cs,
                .annotations = cs->annotations,
             };

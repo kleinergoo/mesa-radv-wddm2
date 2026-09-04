@@ -162,6 +162,7 @@ struct radeon_bo_metadata {
 struct radeon_winsys_ctx;
 
 struct radeon_winsys_bo {
+   uint32_t handle;
    uint64_t va;
    uint64_t size;
    /* buffer is created with AMDGPU_GEM_CREATE_VM_ALWAYS_VALID */
@@ -178,6 +179,7 @@ struct radeon_winsys_bo {
 struct radv_winsys_submit_info {
    enum amd_ip_type ip_type;
    int queue_index;
+   bool is_gang;
    unsigned cs_count;
    unsigned initial_preamble_count;
    unsigned continue_preamble_count;
@@ -225,7 +227,11 @@ enum radv_cs_dump_type {
    RADV_CS_DUMP_TYPE_CTX_ROLLS,
 };
 
+struct radv_winsys_cs;
+
 struct radeon_winsys {
+   struct radeon_info *gpu_info;
+
    void (*destroy)(struct radeon_winsys *ws);
 
    uint64_t (*query_value)(struct radeon_winsys *ws, enum radeon_value_id value);
@@ -314,6 +320,11 @@ struct radeon_winsys {
    int (*get_fd)(struct radeon_winsys *ws);
 
    struct util_sync_provider *(*get_sync_provider)(struct radeon_winsys *ws);
+
+   /* WDDM2: return the D3DKMT device handle used by the runtime's
+    * monitored-fence support (vk_wddm2_monitored_fence).  NULL for other
+    * winsys backends. */
+   uint32_t (*get_wddm2_handle)(struct radeon_winsys *ws);
 
    VkResult (*copy_sync_payloads)(struct vk_device *device,
                                   uint32_t wait_count,

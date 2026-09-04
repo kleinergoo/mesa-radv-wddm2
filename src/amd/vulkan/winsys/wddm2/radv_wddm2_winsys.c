@@ -577,14 +577,6 @@ radv_wddm2_query_marketing_name(struct radv_wddm2_winsys *ws, char *name, size_t
    return STATUS_SUCCESS;
 }
 
-static struct radeon_info *
-radv_wddm2_winsys_query_info(struct radeon_winsys *rws)
-{
-   struct radv_wddm2_winsys *ws = radv_wddm2_winsys(rws);
-
-   return &ws->gpu_info;
-}
-
 static uint64_t
 radv_wddm2_winsys_query_value(struct radeon_winsys *_ws, enum radeon_value_id value)
 {
@@ -703,7 +695,7 @@ radv_wddm2_winsys_get_wddm2_handle(struct radeon_winsys *_ws)
    return ws->device_h;
 }
 
-static const struct vk_sync_type *const *
+const struct vk_sync_type *const *
 radv_wddm2_winsys_get_sync_types(struct radeon_winsys *rws)
 {
    return radv_wddm2_winsys(rws)->sync_types;
@@ -713,6 +705,38 @@ static struct util_sync_provider *
 radv_wddm2_winsys_get_sync_provider(struct radeon_winsys *rws)
 {
    return NULL;
+}
+
+static bool
+radv_wddm2_winsys_read_registers(struct radeon_winsys *rws, unsigned reg_offset, unsigned num_registers,
+                                 uint32_t *out)
+{
+   return false;
+}
+
+static int
+radv_wddm2_winsys_get_fd(struct radeon_winsys *rws)
+{
+   return -1;
+}
+
+static int
+radv_wddm2_winsys_reserve_vmid(struct radeon_winsys *rws)
+{
+   return 0;
+}
+
+static void
+radv_wddm2_winsys_unreserve_vmid(struct radeon_winsys *rws)
+{
+}
+
+static VkResult
+radv_wddm2_winsys_copy_sync_payloads(struct vk_device *device, uint32_t wait_count,
+                                     const struct vk_sync_wait *waits, uint32_t signal_count,
+                                     const struct vk_sync_signal *signals)
+{
+   return VK_SUCCESS;
 }
 
 static bool
@@ -849,13 +873,16 @@ radv_wddm2_winsys_create(const struct vk_dx_adapter_info *adapter_info,
    ws->paging_fence_h = create_paging_queue.hSyncObject;
 
    ws->base.destroy = radv_wddm2_winsys_destroy;
-   ws->base.query_info = radv_wddm2_winsys_query_info;
    ws->base.query_value = radv_wddm2_winsys_query_value;
    ws->base.get_wddm2_handle = radv_wddm2_winsys_get_wddm2_handle;
-   ws->base.get_sync_types = radv_wddm2_winsys_get_sync_types;
    ws->base.get_sync_provider = radv_wddm2_winsys_get_sync_provider;
    ws->base.query_gpuvm_fault = radv_wddm2_winsys_query_gpuvm_fault;
-   ws->base.init_wsi = radv_wddm2_wsi_init;
+   ws->base.read_registers = radv_wddm2_winsys_read_registers;
+   ws->base.get_fd = radv_wddm2_winsys_get_fd;
+   ws->base.reserve_vmid = radv_wddm2_winsys_reserve_vmid;
+   ws->base.unreserve_vmid = radv_wddm2_winsys_unreserve_vmid;
+   ws->base.copy_sync_payloads = radv_wddm2_winsys_copy_sync_payloads;
+   ws->base.gpu_info = &ws->gpu_info;
    radv_wddm2_bo_init_functions(ws);
    radv_wddm2_cs_init_functions(ws);
 

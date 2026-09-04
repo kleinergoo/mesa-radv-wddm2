@@ -311,6 +311,7 @@ with_broadcom_vk = _vulkan_drivers.contains('broadcom')
 with_imagination_vk = _vulkan_drivers.contains('imagination')
 with_imagination_srv = get_option('imagination-srv')
 with_microsoft_vk = _vulkan_drivers.contains('microsoft-experimental')
+with_vulkan_dx = with_microsoft_vk or with_amd_vk
 with_nouveau_vk = _vulkan_drivers.contains('nouveau')
 with_asahi_vk = _vulkan_drivers.contains('asahi')
 with_gfxstream_vk = _vulkan_drivers.contains('gfxstream')
@@ -706,7 +707,7 @@ if with_dri
 endif
 
 dep_dxheaders = null_dep
-if with_gallium_d3d12 or with_microsoft_clc or with_microsoft_vk or (with_any_vk and host_machine.system() == 'windows')
+if with_gallium_d3d12 or with_microsoft_clc or with_microsoft_vk or with_vulkan_dx or (with_any_vk and host_machine.system() == 'windows')
   dep_dxheaders = dependency('directx-headers', required : false)
   if not dep_dxheaders.found()
     dep_dxheaders = dependency('DirectX-Headers',
@@ -723,6 +724,10 @@ if dep_dxheaders.found()
   else
     pre_args += '-DUSE_D3D12_PREVIEW_HEADERS=0'
   endif
+endif
+
+if with_vulkan_dx
+  pre_args += '-DHAVE_VULKAN_DX'
 endif
 
 _with_gallium_d3d12_video = get_option('gallium-d3d12-video')

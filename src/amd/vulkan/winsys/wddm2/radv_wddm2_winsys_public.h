@@ -31,9 +31,13 @@
 #include <vulkan/vulkan_core.h>
 
 struct radeon_winsys;
+struct vk_sync_type;
 struct vk_dx_adapter_info;
 
 VkResult radv_wddm2_winsys_create(const struct vk_dx_adapter_info *adapter_info,
                                   uint64_t debug_flags, struct radeon_winsys **winsys);
+
+const struct vk_sync_type *const *
+radv_wddm2_winsys_get_sync_types(struct radeon_winsys *ws);
 
 #endif /* RADV_WDDM2_WINSYS_PUBLIC_H */

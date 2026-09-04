@@ -37,6 +37,7 @@
 #include "vk_sync_binary.h"
 
 struct vk_sync_type;
+struct radv_wddm2_ctx;
 
 struct vk_wddm2_fence {
    uint32_t handle;
@@ -104,12 +105,18 @@ struct radv_wddm2_winsys {
 
    struct vk_wddm2_fence last_submission[AMD_NUM_IP_TYPES];
 
-   struct vk_sync_binary_type sync_binary_type;
-   const struct vk_sync_type *sync_types[3];
-   struct {
-      void *d3d12_device; 
-      void *d3d12_queue;
-   } wsi;
+    struct vk_sync_binary_type sync_binary_type;
+    const struct vk_sync_type *sync_types[3];
+    struct {
+       void *d3d12_device; 
+       void *d3d12_queue;
+    } wsi;
+
+    /* Representative context used for WDDM2 UpdateGpuVirtualAddress (sparse
+     * bind/unbind).  The 26.2.2 buffer_virtual_bind interface no longer passes
+     * the context/ip-type, so the first radv device context to be created is
+     * remembered here. */
+    struct radv_wddm2_ctx *default_ctx;
 };
 
 static inline struct radv_wddm2_winsys *
