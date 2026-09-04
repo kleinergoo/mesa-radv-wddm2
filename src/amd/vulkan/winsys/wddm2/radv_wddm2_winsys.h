@@ -71,6 +71,22 @@ struct radv_wddm2_winsys {
    uint32_t paging_queue_h;
    uint32_t paging_fence_h;
 
+   /* WDDM node topology, discovered from the adapter's KMD at winsys creation.
+    *
+    * Engines are grouped into nodes by engine type (see Windows driver docs,
+    * "Enumerating GPU Engine Capabilities"): there is exactly one 3-D node per
+    * adapter, and AMD compute/ACE queues are exposed as an additional node
+    * reported as DXGK_ENGINE_TYPE_OTHER on multi-node parts.  On single-node
+    * parts (e.g. Polaris) the 3-D node also hosts the compute/ACE engines.
+    *
+    * These are stored here so queue creation is portable across GPU
+    * generations instead of assuming a fixed node 0 for everything.
+    */
+   uint32_t node_count;              /* total engine nodes on the adapter */
+   uint32_t gfx_node;                /* the 3-D node (always present) */
+   uint32_t compute_node;            /* best compute/ACE node (may equal gfx_node) */
+   bool has_dedicated_compute_node;  /* true if compute_ace != gfx_node */
+
    struct radv_winsys_bo_list global_bo_list;
    struct radv_winsys_bo_log bo_log;
 

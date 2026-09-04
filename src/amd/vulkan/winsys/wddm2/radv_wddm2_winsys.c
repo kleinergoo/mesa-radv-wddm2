@@ -153,7 +153,7 @@ radv_wddm2_fill_gpu_info(struct radv_wddm2_winsys *ws,
                          const struct vk_dx_adapter_info *adapter_info)
 {
    struct radeon_info *info = &ws->gpu_info;
-   uint32_t node, node_count = 0;
+   uint32_t node_count = 0;
    NTSTATUS status;
 
    struct drm_amdgpu_memory_info mem = {};
@@ -226,33 +226,64 @@ radv_wddm2_fill_gpu_info(struct radv_wddm2_winsys *ws,
       }
    }
 
-   /* Nodes information */
-   {
-      D3DKMT_QUERYSTATISTICS stats = {
-         .Type = D3DKMT_QUERYSTATISTICS_ADAPTER,
-         .AdapterLuid = {
-            .LowPart = adapter_info->adapter_luid.LowPart,
-            .HighPart = adapter_info->adapter_luid.HighPart,
-         },
-      };
-      if (NT_SUCCESS(WDDM2_DISPATCH(QueryStatistics(&stats))))
-         node_count = stats.QueryResult.AdapterInformation.NodeCount;
+   /* Nodes information
+    *
+    * Engines on a WDDM adapter are grouped into nodes by engine type; there is
+    * exactly one 3-D node per adapter, and AMD compute/ACE queues live either on
+    * that 3-D node (single-node parts such as Polaris) or on a separate node
+    * reported as DXGK_ENGINE_TYPE_OTHER (multi-node parts such as Vega/Navi).
+    *
+    * We discover this topology from the KMD and persist it on the winsys so
+    * queue creation below is portable across GPU generations.  The env overrides
+    * (RADV_DXGI_*_NODE) let the node be pinned for debugging/validation.
+    */
+   ws->node_count = 0;
+   ws->gfx_node = 0;
+   ws->compute_node = 0;
+   ws->has_dedicated_compute_node = false;
 
-      for (uint32_t i = 0; i < node_count; ++i) {
-         D3DKMT_NODEMETADATA metadata = {
-            .NodeOrdinalAndAdapterIndex = MAKEWORD(i, adapter_info->physical_adapter_index),
-         };
-         if (NT_SUCCESS(query_adapter_info(ws, KMTQAITYPE_NODEMETADATA,
-                                           &metadata, sizeof(metadata)))) {
-            if (ws->debug_all_bos)
-               fprintf(stderr, "node %i (type: %i) = %ls, flags = %x\n",
-                       i, metadata.NodeData.EngineType, metadata.NodeData.FriendlyName,
-                       metadata.NodeData.Flags.Value);
-            if (metadata.NodeData.EngineType == DXGK_ENGINE_TYPE_3D)
-               node = i;
-         }
-      }
+   D3DKMT_QUERYSTATISTICS stats = {
+      .Type = D3DKMT_QUERYSTATISTICS_ADAPTER,
+      .AdapterLuid = {
+         .LowPart = adapter_info->adapter_luid.LowPart,
+         .HighPart = adapter_info->adapter_luid.HighPart,
+      },
+   };
+   if (NT_SUCCESS(WDDM2_DISPATCH(QueryStatistics(&stats))))
+      node_count = stats.QueryResult.AdapterInformation.NodeCount;
+
+   for (uint32_t i = 0; i < node_count; ++i) {
+      D3DKMT_NODEMETADATA metadata = {
+         .NodeOrdinalAndAdapterIndex = MAKEWORD(i, adapter_info->physical_adapter_index),
+      };
+      if (!NT_SUCCESS(query_adapter_info(ws, KMTQAITYPE_NODEMETADATA,
+                                         &metadata, sizeof(metadata))))
+         continue;
+
+      if (ws->debug_all_bos)
+         fprintf(stderr, "node %i (type: %i) = %ls, flags = %x\n",
+                 i, metadata.NodeData.EngineType, metadata.NodeData.FriendlyName,
+                 metadata.NodeData.Flags.Value);
+
+      /* 3-D node: always present, hosts the graphics + (on single-node parts)
+       * the compute/ACE engines. */
+      if (metadata.NodeData.EngineType == DXGK_ENGINE_TYPE_3D)
+         ws->gfx_node = i;
+      /* AMD exposes its compute/ACE engine as a dedicated node reported with the
+       * proprietary OTHER engine type (there is no DXGK_ENGINE_TYPE_COMPUTE).
+       * Prefer it for compute work; fall back to gfx_node when absent. */
+      else if (metadata.NodeData.EngineType == DXGK_ENGINE_TYPE_OTHER)
+         ws->compute_node = i;
    }
+
+   ws->node_count = node_count;
+   ws->has_dedicated_compute_node = (ws->compute_node != ws->gfx_node &&
+                                     ws->compute_node != 0);
+
+   if (ws->debug_all_bos)
+      fprintf(stderr, "radv/wddm2: nodes=%u gfx=%u compute=%u dedicated_compute=%d\n",
+              ws->node_count, ws->gfx_node, ws->compute_node,
+              (int)ws->has_dedicated_compute_node);
 
    /* Search static device database */
    const struct amdgpu_device *amdgpu_dev = NULL;

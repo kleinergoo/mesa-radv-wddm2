@@ -223,13 +223,17 @@ radv_wddm2_queue_init(struct radv_wddm2_winsys *ws, enum amd_ip_type hw_ip,
 
    switch (hw_ip) {
    case AMD_IP_GFX:
-      node = debug_get_num_option("RADV_DXGI_3D_NODE", 0);
+      /* The 3-D node, discovered from the KMD at winsys creation. */
+      node = debug_get_num_option("RADV_DXGI_3D_NODE", ws->gfx_node);
       break;
    case AMD_IP_COMPUTE:
-      /* Use the same node as GFX by default: standalone compute submissions to
-       * node 2 fault the GPU on this backend (see radv_wddm2_cs_submit).  The
-       * 3D node (0) also hosts the compute/ACE engine on single-node parts. */
-      node = debug_get_num_option("RADV_DXGI_COMPUTE_NODE", 0);
+      /* Prefer the dedicated compute/ACE node when the adapter exposes one
+       * (multi-node parts such as Vega/Navi); otherwise the 3-D node hosts the
+       * compute/ACE engines (single-node parts such as Polaris).  The env
+       * override pins a specific node for debugging. */
+      node = debug_get_num_option("RADV_DXGI_COMPUTE_NODE",
+                                  ws->has_dedicated_compute_node ? ws->compute_node
+                                                                  : ws->gfx_node);
       break;
    default:
       /* Not supported */
@@ -243,9 +247,16 @@ radv_wddm2_queue_init(struct radv_wddm2_winsys *ws, enum amd_ip_type hw_ip,
    D3DKMT_CREATECONTEXTVIRTUAL create_context = {
       .hDevice = ws->device_h,
       .NodeOrdinal = node,
-      /* Bitmask selecting engine instance(s) within the node. Engine 0 is the
-       * only engine on single-node discrete parts (Polaris); multi-node parts
-       * are not supported by this backend. */
+      /* EngineAffinity is a bitmask selecting engine instance(s) within the
+       * node.  We use engine 0, which is the only engine exposed on single-node
+       * parts (Polaris) and the first engine on multi-engine nodes.
+       *
+       * TODO: The standard WDDM queries (NodeMetadata, QueryStatistics) do not
+       * expose how many physical engine instances a node contains, so the mask
+       * cannot be derived portably here.  Multi-engine nodes (RDNA-class parts
+       * with several engines per node) are not selectable beyond engine 0 until
+       * a KMD-specific path that reports per-node engine counts is implemented.
+       */
       .EngineAffinity = 1,
       .Flags = {
          .DisableGpuTimeout = true,
@@ -271,7 +282,8 @@ radv_wddm2_queue_init(struct radv_wddm2_winsys *ws, enum amd_ip_type hw_ip,
       D3DKMT_CREATEHWCONTEXT create_hw_context = {
          .hDevice = ws->device_h,
          .NodeOrdinal = node,
-         /* Engine 0 is the only engine on single-node discrete parts. */
+         /* EngineAffinity = engine 0 (see TODO at CreateContextVirtual site;
+          * per-node engine count is not exposed portably by WDDM). */
          .EngineAffinity = 1,
          .PrivateDriverDataSize = sizeof(create_context_data),
          .pPrivateDriverData = &create_context_data,
@@ -301,6 +313,7 @@ radv_wddm2_queue_init(struct radv_wddm2_winsys *ws, enum amd_ip_type hw_ip,
          .Info = {
             .Type = D3DDDI_MONITORED_FENCE,
             .MonitoredFence = {
+               /* EngineAffinity = engine 0 (same node as the context above). */
                .EngineAffinity = 1,
             },
          }
@@ -709,19 +722,25 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
    struct radv_wddm2_queue *ace_queue = &ctx->ace_queue;
    NTSTATUS status;
 
-   if (ctx->ws->dump_ibs && !submit->is_gang && submit->ip_type == AMD_IP_COMPUTE)
+   if (ctx->ws->dump_ibs && !ctx->ws->has_dedicated_compute_node &&
+       !submit->is_gang && submit->ip_type == AMD_IP_COMPUTE)
       fprintf(stderr, "ACE-ON-GFX: routing compute submit via GFX queue\n");
 
-   /* Standalone COMPUTE (ACE) submissions to the compute context
-    * (NodeOrdinal=2) fault the GPU on this backend, producing a GPU exception
-    * (VK_ERROR_DEVICE_LOST) on the next submit. This is hit by D3D9-via-DXVK
-    * workloads that issue compute submissions, but not by native Vulkan
-    * present paths (which only use GFX). Route non-gang compute command
-    * buffers through the GFX hw context/queue, which is verified working; this
-    * serializes the (rare, D3D9) standalone compute work on the GFX engine
-    * instead of faulting. Gang submits already submit compute via the AIB
-    * queue and are unaffected. */
-   if (!submit->is_gang && submit->ip_type == AMD_IP_COMPUTE)
+   /* Standalone COMPUTE (ACE) submissions to the compute context fault the GPU
+    * on SINGLE-NODE parts (Polaris: the only compute context that can be created
+    * there ends up on the same node the KMD schedules as node 2, which faults),
+    * producing a GPU exception (VK_ERROR_DEVICE_LOST) on the next submit. This
+    * is hit by D3D9-via-DXVK workloads that issue compute submissions, but not
+    * by native Vulkan present paths (which only use GFX). Route non-gang
+    * compute command buffers through the GFX hw context/queue, which is verified
+    * working; this serializes the (rare, D3D9) standalone compute work on the
+    * GFX engine instead of faulting. Gang submits already submit compute via the
+    * AIB queue and are unaffected.
+    *
+    * On multi-node parts (Vega/Navi, has_dedicated_compute_node) a dedicated
+    * compute node is discovered and used, so this workaround is NOT applied. */
+   if (!submit->is_gang && submit->ip_type == AMD_IP_COMPUTE &&
+       !ctx->ws->has_dedicated_compute_node)
       queue = &ctx->per_ip[AMD_IP_GFX].queue;
 
    assert(queue->context_h != 0 && "Unsupported IP type");
