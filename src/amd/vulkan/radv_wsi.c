@@ -21,6 +21,10 @@
 #include "tools/radv_debug.h"
 #include "wsi_common.h"
 
+#ifdef _WIN32
+#include "winsys/wddm2/radv_wddm2_wsi.h"
+#endif
+
 static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
 radv_wsi_proc_addr(VkPhysicalDevice physicalDevice, const char *pName)
 {
@@ -110,6 +114,10 @@ radv_init_wsi(struct radv_physical_device *pdev)
    }
 
    wsi_device_setup_syncobj_fd(&pdev->wsi_device, pdev->wsi_syncobj_fd);
+
+#ifdef _WIN32
+   radv_wddm2_wsi_init(&pdev->wsi_device);
+#endif
 
    pdev->vk.wsi_device = &pdev->wsi_device;
 

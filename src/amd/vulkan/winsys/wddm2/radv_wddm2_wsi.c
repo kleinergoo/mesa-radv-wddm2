@@ -78,7 +78,7 @@ radv_wddm2_wsi_needs_blits(VkDevice _device)
 }
 
 void
-radv_wddm2_wsi_init(struct radeon_winsys *ws, struct wsi_device *wsi)
+radv_wddm2_wsi_init(struct wsi_device *wsi)
 {
    wsi->win32.get_d3d12_command_queue = radv_wddm2_wsi_get_d3d12_command_queue;
    wsi->win32.requires_blits = radv_wddm2_wsi_needs_blits;

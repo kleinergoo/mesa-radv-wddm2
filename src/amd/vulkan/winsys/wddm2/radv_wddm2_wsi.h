@@ -24,11 +24,10 @@
 #ifndef RADV_WDDM2_WSI_H
 #define RADV_WDDM2_WSI_H
 
-struct radeon_winsys;
 struct radv_wddm2_winsys;
 struct wsi_device;
 
-void radv_wddm2_wsi_init(struct radeon_winsys *ws, struct wsi_device *wsi);
+void radv_wddm2_wsi_init(struct wsi_device *wsi);
 void radv_wddm2_wsi_finish(struct radv_wddm2_winsys *ws);
 
 #endif /* RADV_WDDM2_WSI_H */

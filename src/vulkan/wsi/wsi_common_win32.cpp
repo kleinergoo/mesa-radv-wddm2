@@ -383,6 +383,8 @@ wsi_win32_surface_get_formats2(VkIcdSurfaceBase *icd_surface,
 }
 
 static const VkPresentModeKHR present_modes_gdi[] = {
+   VK_PRESENT_MODE_IMMEDIATE_KHR,
+   VK_PRESENT_MODE_MAILBOX_KHR,
    VK_PRESENT_MODE_FIFO_KHR,
 };
 static const VkPresentModeKHR present_modes_dxgi[] = {
@@ -399,7 +401,8 @@ wsi_win32_surface_get_present_modes(VkIcdSurfaceBase *surface,
 {
    const VkPresentModeKHR *array;
    size_t array_size;
-   if (wsi_device->sw || !wsi_device->win32.get_d3d12_command_queue) {
+   if (wsi_device->sw || !wsi_device->win32.get_d3d12_command_queue ||
+       !wsi_device->win32.create_image_memory) {
       array = present_modes_gdi;
       array_size = ARRAY_SIZE(present_modes_gdi);
    } else {
@@ -977,7 +980,8 @@ wsi_win32_surface_create_swapchain(
 
    bool supports_dxgi = wsi->dxgi.factory &&
                         wsi->dxgi.dcomp &&
-                        wsi->wsi->win32.get_d3d12_command_queue;
+                        wsi->wsi->win32.get_d3d12_command_queue &&
+                        wsi->wsi->win32.create_image_memory;
    if (getenv("RADV_WSI_DEBUG"))
       fprintf(stderr, "W32SC supports_dxgi=%d type=%d count=%u extent=%ux%u present=%u\n",
               supports_dxgi, (int)(supports_dxgi ? WSI_IMAGE_TYPE_DXGI : WSI_IMAGE_TYPE_CPU),
