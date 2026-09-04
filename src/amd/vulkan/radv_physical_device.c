@@ -40,6 +40,8 @@ typedef void *drmDevicePtr;
 #include "drm-uapi/amdgpu_drm.h"
 #include "util/os_drm.h"
 #include "winsys/amdgpu/radv_amdgpu_winsys_public.h"
+#endif
+#ifdef HAVE_VULKAN_DX
 #include "winsys/wddm2/radv_wddm2_winsys_public.h"
 #endif
 #include "git_sha1.h"
@@ -2608,11 +2610,14 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
    }
 
    int num_sync_types = 0;
+#ifdef HAVE_VULKAN_DX
    if (pdev->ws->get_wddm2_handle) {
       const struct vk_sync_type *const *sync_types = radv_wddm2_winsys_get_sync_types(pdev->ws);
       for (num_sync_types = 0; sync_types[num_sync_types]; num_sync_types++)
          pdev->sync_types[num_sync_types] = sync_types[num_sync_types];
-   } else if (pdev->syncobj_sync_type.features) {
+   } else
+#endif
+   if (pdev->syncobj_sync_type.features) {
       if (!pdev->info.has_timeline_syncobj && pdev->syncobj_sync_type.features & VK_SYNC_FEATURE_TIMELINE) {
          pdev->syncobj_sync_type.get_value = NULL;
          pdev->syncobj_sync_type.features &= ~VK_SYNC_FEATURE_TIMELINE;
