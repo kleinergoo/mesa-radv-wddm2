@@ -78,6 +78,11 @@ struct radv_wddm2_winsys {
    uint32_t paging_queue_h;
    uint32_t paging_fence_h;
 
+   /* GPU-alive watchdog: polls GetDeviceState every 200ms. If the engine is
+    * HUNG or RESET, kills the process immediately so DWM doesn't freeze. */
+   HANDLE watchdog_thread;
+   bool watchdog_stop;
+
    /* WDDM node topology, discovered from the adapter's KMD at winsys creation.
     *
     * Engines are grouped into nodes by engine type (see Windows driver docs,

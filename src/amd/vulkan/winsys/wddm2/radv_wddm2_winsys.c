@@ -84,6 +84,31 @@ winsys_luid_key(const LUID *luid)
    return ((uintptr_t)(uint32_t)luid->HighPart << 32) | (uint32_t)luid->LowPart;
 }
 
+/* GPU-alive watchdog: polls GetDeviceState every 200ms. If the engine is
+ * HUNG or RESET, kills the process immediately so DWM doesn't freeze. */
+static DWORD WINAPI
+radv_wddm2_watchdog_thread(LPVOID param)
+{
+   struct radv_wddm2_winsys *ws = param;
+   while (!ws->watchdog_stop) {
+      Sleep(200);
+      D3DKMT_GETDEVICESTATE get_state = {
+         .hDevice = ws->device_h,
+         .StateType = D3DKMT_DEVICESTATE_EXECUTION,
+      };
+      NTSTATUS status = WDDM2_DISPATCH(GetDeviceState(&get_state));
+      if (NT_SUCCESS(status) &&
+          (get_state.ExecutionState == D3DKMT_DEVICEEXECUTION_HUNG ||
+           get_state.ExecutionState == D3DKMT_DEVICEEXECUTION_RESET)) {
+         fprintf(stderr, "radv/wddm2: watchdog: GPU %s (state=0x%x), killing process\n",
+                 get_state.ExecutionState == D3DKMT_DEVICEEXECUTION_HUNG ? "HUNG" : "RESET",
+                 get_state.ExecutionState);
+         TerminateProcess(GetCurrentProcess(), 1);
+      }
+   }
+   return 0;
+}
+
 static NTSTATUS
 query_adapter_info(struct radv_wddm2_winsys *ws,
                    KMTQUERYADAPTERINFOTYPE info_type,
@@ -837,6 +862,11 @@ radv_wddm2_winsys_destroy(struct radeon_winsys *_ws)
    if (!destroy)
       return;
 
+   /* Stop GPU-alive watchdog thread before destroying device */
+   ws->watchdog_stop = true;
+   WaitForSingleObject(ws->watchdog_thread, 1000);
+   CloseHandle(ws->watchdog_thread);
+
    radv_wddm2_bo_destroy_deferred_all(ws);
 
    radv_winsys_bo_list_destroy(&ws->global_bo_list);
@@ -1103,6 +1133,10 @@ radv_wddm2_winsys_create(const struct vk_dx_adapter_info *adapter_info,
    ws->sync_types[0] = &vk_wddm2_monitored_fence_type;
    ws->sync_types[1] = &ws->sync_binary_type.sync;
    ws->sync_types[2] = NULL;
+
+   /* Start GPU-alive watchdog thread */
+   ws->watchdog_stop = false;
+   ws->watchdog_thread = CreateThread(NULL, 0, radv_wddm2_watchdog_thread, ws, 0, NULL);
 
    _mesa_hash_table_insert(winsyses, (void *) winsys_luid_key(&ws->adapter_luid), ws);
    simple_mtx_unlock(&winsys_creation_mutex);
