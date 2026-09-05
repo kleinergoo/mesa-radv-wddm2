@@ -438,6 +438,7 @@ radv_wddm2_fill_gpu_info(struct radv_wddm2_winsys *ws,
     */
    ws->node_count = 0;
    ws->gfx_node = 0;
+   info->has_gpuvm_fault_query = true;
    ws->compute_node = 0;
    ws->has_dedicated_compute_node = false;
 
@@ -450,6 +451,14 @@ radv_wddm2_fill_gpu_info(struct radv_wddm2_winsys *ws,
    };
    if (NT_SUCCESS(WDDM2_DISPATCH(QueryStatistics(&stats))))
       node_count = stats.QueryResult.AdapterInformation.NodeCount;
+
+   {
+      char msg[128];
+      snprintf(msg, sizeof(msg), "fill_gpu_info: node_count = %u", node_count);
+      if (getenv("RADV_WDDM2_TRACE")) {
+         fprintf(stderr, "[wddm2probe:winsys] %s\n", msg);
+      }
+   }
 
    for (uint32_t i = 0; i < node_count; ++i) {
       D3DKMT_NODEMETADATA metadata = {
@@ -989,20 +998,30 @@ radv_wddm2_winsys_query_info(const struct vk_dx_adapter_info *adapter_info,
    tmp_ws.debug_all_bos = !!(debug_flags & RADV_DEBUG_ALL_BOS);
    tmp_ws.adapter_luid = adapter_info->adapter_luid;
 
+   if (getenv("RADV_WDDM2_TRACE"))
+      fprintf(stderr, "[wddm2probe:winsys] query_info enter (luid %x:%x)\n",
+              adapter_info->adapter_luid.LowPart, adapter_info->adapter_luid.HighPart);
+
    D3DKMT_OPENADAPTERFROMLUID open_adapter = {
       .AdapterLuid = adapter_info->adapter_luid,
    };
    status = WDDM2_DISPATCH(OpenAdapterFromLuid(&open_adapter));
    if (!NT_SUCCESS(status))
       return VK_ERROR_INITIALIZATION_FAILED;
+   if (getenv("RADV_WDDM2_TRACE"))
+      fprintf(stderr, "[wddm2probe:winsys] OpenAdapterFromLuid ok\n");
 
    tmp_ws.adapter_h = open_adapter.hAdapter;
 
    status = radv_wddm2_fill_gpu_info(&tmp_ws, adapter_info);
    if (!NT_SUCCESS(status)) {
+      if (getenv("RADV_WDDM2_TRACE"))
+         fprintf(stderr, "[wddm2probe:winsys] fill_gpu_info failed (%x)\n", (unsigned)status);
       result = VK_ERROR_INITIALIZATION_FAILED;
       goto close_adapter;
    }
+   if (getenv("RADV_WDDM2_TRACE"))
+      fprintf(stderr, "[wddm2probe:winsys] fill_gpu_info ok\n");
 
    status = radv_wddm2_query_marketing_name(&tmp_ws, tmp_ws.gpu_info.marketing_name,
                                              sizeof(tmp_ws.gpu_info.marketing_name));
@@ -1010,6 +1029,8 @@ radv_wddm2_winsys_query_info(const struct vk_dx_adapter_info *adapter_info,
       result = VK_ERROR_INITIALIZATION_FAILED;
       goto close_adapter;
    }
+   if (getenv("RADV_WDDM2_TRACE"))
+      fprintf(stderr, "[wddm2probe:winsys] query_marketing_name ok ('%s')\n", tmp_ws.gpu_info.marketing_name);
 
    info->base = tmp_ws.gpu_info;
 
@@ -1067,14 +1088,20 @@ radv_wddm2_winsys_create(const struct vk_dx_adapter_info *adapter_info,
    ws->debug_all_bos = !!(debug_flags & RADV_DEBUG_ALL_BOS);
    ws->debug_log_bos = debug_flags & RADV_DEBUG_HANG;
    ws->dump_ibs = !!(debug_flags & RADV_DEBUG_DUMP_IBS);
+   ws->dbg = !!getenv("RADV_WDDM2_DBG");
    radv_winsys_bo_list_init(&ws->global_bo_list);
    radv_winsys_bo_log_init(&ws->bo_log, debug_flags);
    simple_mtx_init(&ws->deferred_mtx, mtx_plain);
    list_inithead(&ws->deferred_list);
+   simple_mtx_init(&ws->d3d_mtx, mtx_plain);
    simple_mtx_init(&ws->alloc_mtx, mtx_plain);
    ws->alloc_vram = 0;
    ws->alloc_vram_vis = 0;
    ws->alloc_gtt = 0;
+   simple_mtx_init(&ws->va_mtx, mtx_plain);
+   ws->va_live = 0;
+   ws->va_mapped_total = 0;
+   ws->va_freed_total = 0;
 
    D3DKMT_OPENADAPTERFROMLUID open_adapter = {
       .AdapterLuid = ws->adapter_luid,

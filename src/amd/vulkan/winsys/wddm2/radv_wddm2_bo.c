@@ -494,6 +494,7 @@ radv_wddm2_bo_create_internal(struct radeon_winsys *_ws, uint64_t size, unsigned
    bool gtt_spill = false;
    bool want_vram = (initial_domain & RADEON_DOMAIN_VRAM) != 0;
 
+   simple_mtx_lock(&ws->d3d_mtx);
 retry_alloc:
    {
    uint8_t alloc_pdata[824] = {0};
@@ -532,12 +533,51 @@ retry_alloc:
 
    status = WDDM2_DISPATCH(CreateAllocation2(&create));
    if (!NT_SUCCESS(status)) {
-      if (want_vram && !gtt_spill) {
+      static LONG diag_once = 0;
+      if (InterlockedCompareExchange(&diag_once, 1, 0) == 0) {
+         D3DKMT_GETDEVICESTATE exst = { .hDevice = ws->device_h, .StateType = D3DKMT_DEVICESTATE_EXECUTION };
+         NTSTATUS exst_status = WDDM2_DISPATCH(GetDeviceState(&exst));
+         fprintf(stderr, "DIAG CreateAllocation2 first-fail 0x%X exec_state=0x%X getdevicestate=0x%X\n",
+                 status,
+                 NT_SUCCESS(exst_status) ? exst.ExecutionState : 0xffffffffu,
+                 NT_SUCCESS(exst_status) ? 0u : (uint32_t)exst_status);
+         if (NT_SUCCESS(exst_status) && exst.ExecutionState == D3DKMT_DEVICEEXECUTION_ERROR_DMAPAGEFAULT) {
+             D3DKMT_GETDEVICESTATE pfst = { .hDevice = ws->device_h, .StateType = D3DKMT_DEVICESTATE_PAGE_FAULT };
+             if (NT_SUCCESS(WDDM2_DISPATCH(GetDeviceState(&pfst))))
+                fprintf(stderr, "DIAG faulted VA: 0x%" PRIx64 " err=0x%x flags=%u stage=%u\n",
+                        pfst.PageFaultState.FaultedVirtualAddress,
+                        pfst.PageFaultState.FaultErrorCode.GeneralErrorCode,
+                        pfst.PageFaultState.PageFaultFlags,
+                        pfst.PageFaultState.FaultedPipelineStage);
+          }
+       }
+       if (want_vram && !gtt_spill) {
          fprintf(stderr, "CreateAllocation2 failed 0x%X (VRAM), spilling to GTT\n", status);
          gtt_spill = true;
          goto retry_alloc;
       }
-      fprintf(stderr, "CreateAllocation2 failed 0x%X\n", status);
+      fprintf(stderr,
+              "CreateAllocation2 failed 0x%X\n"
+              "  RADV_WDDM2_BO_DBG size=0x%" PRIx64 " phys_size=0x%" PRIx64
+              " phys_align=0x%x virt_align=0x%x\n"
+              "  RADV_WDDM2_BO_DBG dom=0x%x flags=0x%x prio=%u addr=0x%" PRIx64
+              " cpu_ptr=%p gtt_spill=%d\n"
+              "  RADV_WDDM2_BO_DBG pdata_size=%u create_flags res=%d shrd=%d nonsec=%d\n"
+              "  RADV_WDDM2_BO_DBG alloc flags=0x%x heaps[0]=0x%x\n",
+              status, size, phys_size, phys_alignment, (uint32_t)virt_alignment,
+              (unsigned)initial_domain, (unsigned)flags, priority, address, cpu_ptr, gtt_spill ? 1 : 0,
+              pdata_size, create.Flags.CreateResource, create.Flags.CreateShared,
+              create.Flags.NonSecure, ((struct alloc_entry *)(alloc_pdata + sizeof(struct alloc_header)))->bo_info.flags,
+              ((struct alloc_entry *)(alloc_pdata + sizeof(struct alloc_header)))->bo_info.flags & 0xF);
+      if (ws->dbg) {
+         simple_mtx_lock(&ws->alloc_mtx);
+         fprintf(stderr, "  RADV_WDDM2_BO_DBG vram=0x%llx vram_vis=0x%llx gtt=0x%llx deferred=%u\n",
+                 (unsigned long long)ws->alloc_vram,
+                 (unsigned long long)ws->alloc_vram_vis,
+                 (unsigned long long)ws->alloc_gtt,
+                 (unsigned)list_length(&ws->deferred_list));
+         simple_mtx_unlock(&ws->alloc_mtx);
+      }
       result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
       goto error_ptr_alloc;
    }
@@ -571,11 +611,31 @@ retry_alloc:
    };
    status = WDDM2_DISPATCH(MapGpuVirtualAddress(&map));
    if (!NT_SUCCESS(status)) {
-      fprintf(stderr, "mapping 0x%" PRIx64 " failed: 0x%X\n", bo->base.va, status);
+      simple_mtx_lock(&ws->va_mtx);
+      fprintf(stderr,
+              "mapping 0x%" PRIx64 " failed: 0x%X\n"
+              "  RADV_WDDM2_VA_DBG size=0x%" PRIx64 " live=0x%" PRIx64
+              " mapped_total=0x%" PRIx64 " freed_total=0x%" PRIx64 "\n",
+              bo->base.va, status, phys_size, ws->va_live,
+              ws->va_mapped_total, ws->va_freed_total);
+      simple_mtx_unlock(&ws->va_mtx);
+      simple_mtx_lock(&ws->alloc_mtx);
+      fprintf(stderr,
+              "  RADV_WDDM2_VA_DBG dom=0x%x alloc_vram=0x%" PRIx64
+              " alloc_vram_vis=0x%" PRIx64 " alloc_gtt=0x%" PRIx64
+              " deferred_items=%u\n",
+              (unsigned)initial_domain, ws->alloc_vram, ws->alloc_vram_vis,
+              ws->alloc_gtt, (unsigned)list_length(&ws->deferred_list));
+      simple_mtx_unlock(&ws->alloc_mtx);
       result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
       goto error_va_alloc;
    }
    bo->base.va = map.VirtualAddress;
+
+   simple_mtx_lock(&ws->va_mtx);
+   ws->va_live += bo->base.size;
+   ws->va_mapped_total += bo->base.size;
+   simple_mtx_unlock(&ws->va_mtx);
 
    uint64_t paging_fence_value = map.PagingFenceValue;
 
@@ -615,6 +675,8 @@ retry_alloc:
 
    radv_wddm2_bo_account(ws, bo, bo->base.size);
 
+   simple_mtx_unlock(&ws->d3d_mtx);
+
    *out_bo = (struct radeon_winsys_bo *)bo;
    return VK_SUCCESS;
 
@@ -623,6 +685,7 @@ error_va_alloc:
    assert(NT_SUCCESS(status));
 
 error_ptr_alloc:
+   simple_mtx_unlock(&ws->d3d_mtx);
    FREE(bo);
    return result;
    }
@@ -960,6 +1023,8 @@ radv_wddm2_bo_destroy_now(struct radv_wddm2_winsys *ws, struct radv_wddm2_bo *bo
    struct radeon_winsys *_ws = &ws->base;
    struct radeon_winsys_bo *_bo = &bo->base;
 
+   simple_mtx_lock(&ws->d3d_mtx);
+
    if (all_resident && !bo->base.is_virtual) {
       D3DKMT_EVICT evict = {
          .hDevice = ws->device_h,
@@ -981,6 +1046,11 @@ radv_wddm2_bo_destroy_now(struct radv_wddm2_winsys *ws, struct radv_wddm2_bo *bo
    };
    status = WDDM2_DISPATCH(FreeGpuVirtualAddress(&unmap));
 
+   simple_mtx_lock(&ws->va_mtx);
+   ws->va_live -= bo->base.size;
+   ws->va_freed_total += bo->base.size;
+   simple_mtx_unlock(&ws->va_mtx);
+
    if (!bo->base.is_virtual) {
       const D3DKMT_DESTROYALLOCATION2 destroy = {
          .hDevice = ws->device_h,
@@ -996,6 +1066,8 @@ radv_wddm2_bo_destroy_now(struct radv_wddm2_winsys *ws, struct radv_wddm2_bo *bo
    }
 
    radv_wddm2_bo_account(ws, bo, -bo->base.size);
+
+   simple_mtx_unlock(&ws->d3d_mtx);
 
    FREE(bo);
 }
@@ -1026,8 +1098,9 @@ radv_wddm2_deferred_collect(struct radv_wddm2_winsys *ws, struct list_head *done
 
    struct radv_wddm2_deferred_bo *d, *next;
    LIST_FOR_EACH_ENTRY_SAFE(d, next, &ws->deferred_list, list) {
-      if (!force && p_atomic_read(d->fence.value_map) < d->fence.wait_value)
+      if (!force && p_atomic_read(d->fence.value_map) < d->fence.wait_value) {
          break;
+      }
 
       list_del(&d->list);
       list_addtail(&d->list, done);
@@ -1154,22 +1227,52 @@ radv_wddm2_bo_destroy(struct radeon_winsys *_ws, struct radeon_winsys_bo *_bo)
    /* A chained IB / command buffer BO must not be torn down while a previously
     * submitted command stream may still reference its VA via an INDIRECT_BUFFER
     * chain, otherwise that VA can be reused and the GPU would fault executing
-    * stale content. If any queue still has in-flight work, defer the real
-    * destroy until that fence retires. */
+    * stale content (use-after-free -> page fault -> DEVICEEXECUTION_HUNG).
+    *
+    * The winsys fence snapshot is published by the submit path while holding
+    * deferred_mtx across the whole SubmitCommand+Siganl+publish critical
+    * section, so a destroy taking the same mutex here is strictly ordered either
+    * *before* any IB is handed to the kernel (device idle, safe to free) or
+    * *after* the referencing submission's fence has been published (in which
+    * case we defer until that fence provably retires).  There is no window where
+    * the destroy can observe "idle" between SubmitCommand and the publish. */
+   simple_mtx_lock(&ws->deferred_mtx);
+
+   bool in_flight = false;
+   struct vk_wddm2_fence snap[AMD_NUM_IP_TYPES];
    for (unsigned ip = 0; ip < AMD_NUM_IP_TYPES; ip++) {
-      struct vk_wddm2_fence *last = &ws->last_submission[ip];
-      if (last->handle != 0 && p_atomic_read(last->value_map) < last->wait_value) {
-         /* A BO must only ever be deferred once. If it is already pending in the
-          * deferred list, another (app-level) destroy raced us; do not enqueue a
-          * second node or the drain would free the same BO twice. */
+      snap[ip] = ws->last_submission[ip];
+      if (snap[ip].handle != 0 &&
+          p_atomic_read(snap[ip].value_map) < snap[ip].wait_value)
+         in_flight = true;
+   }
+
+   simple_mtx_unlock(&ws->deferred_mtx);
+
+   if (in_flight) {
+      /* Pick the first still-in-flight fence as the retire guard: waiting on the
+       * last submission of any queue implies every earlier submission on that
+       * queue has completed, so the guarded VA can be freed once its value is
+       * reached.  A BO must only ever be deferred once; if another (app-level)
+       * destroy raced us, the existing node covers the fence already. */
+      struct vk_wddm2_fence *guard = NULL;
+      for (unsigned ip = 0; ip < AMD_NUM_IP_TYPES; ip++) {
+         if (snap[ip].handle != 0 &&
+             p_atomic_read(snap[ip].value_map) < snap[ip].wait_value) {
+            guard = &snap[ip];
+            break;
+         }
+      }
+
+      if (guard) {
          struct radv_wddm2_deferred_bo *d = calloc(1, sizeof(*d));
          if (!d) {
             fprintf(stderr, "radv/wddm2: out of memory allocating deferred BO\n");
-            continue;
+            return;
          }
 
          d->bo = bo;
-         d->fence = *last;
+         d->fence = *guard;
 
          simple_mtx_lock(&ws->deferred_mtx);
          struct radv_wddm2_deferred_bo *already = NULL, *tmp;
@@ -1190,6 +1293,27 @@ radv_wddm2_bo_destroy(struct radeon_winsys *_ws, struct radeon_winsys_bo *_bo)
          simple_mtx_unlock(&ws->deferred_mtx);
          return;
       }
+   }
+
+   /* Every queue snapshot reads idle, taken under the same mutex that serializes
+    * the submit+publish critical section, so no IB referencing this BO can be in
+    * the kernel at this moment.  Re-validate the snapshot under the lock (a fence
+    * could have been destroyed in the meantime, which would make the local
+    * handle/value_map copy stale and the value_map page possibly unmapped), then
+    * block on the last-known fence for belt-and-suspenders (all idle here, so
+    * the waits are quick polls), then free. */
+   simple_mtx_lock(&ws->deferred_mtx);
+   for (unsigned ip = 0; ip < AMD_NUM_IP_TYPES; ip++) {
+      if (snap[ip].handle != 0 &&
+          (ws->last_submission[ip].handle != snap[ip].handle ||
+           ws->last_submission[ip].wait_value != snap[ip].wait_value))
+         snap[ip].handle = 0;
+   }
+   simple_mtx_unlock(&ws->deferred_mtx);
+
+   for (unsigned ip = 0; ip < AMD_NUM_IP_TYPES; ip++) {
+      if (snap[ip].handle != 0)
+         vk_wddm2_fence_wait(ws->device_h, &snap[ip]);
    }
 
    radv_wddm2_bo_destroy_now(ws, bo);

@@ -57,6 +57,34 @@
 #include <assert.h>
 #include <d3dkmthk.h>
 
+/* Probe: on a submission failure the KMD/VidSch marks the device with a GPU
+ * exception (STATUS_GRAPHICS_GPU_EXCEPTION_ON_DEVICE == 0xC01E0200).  Query the
+ * device state to recover the faulted VA / pipeline stage and dump the last-4
+ * submitted IBs captured under RADV_WDDM2_SNAP so the offending dispatch can be
+ * decoded.  Probe only. */
+static void
+radv_wddm2_dump_gpu_exception(struct radv_wddm2_winsys *ws)
+{
+   D3DKMT_GETDEVICESTATE exst = {
+      .hDevice = ws->device_h,
+      .StateType = D3DKMT_DEVICESTATE_EXECUTION,
+   };
+   NTSTATUS status = WDDM2_DISPATCH(GetDeviceState(&exst));
+   fprintf(stderr, "[wddm2:gpu] exec_state=0x%X getdevicestate=0x%X\n",
+           NT_SUCCESS(status) ? exst.ExecutionState : 0xffffffffu,
+           NT_SUCCESS(status) ? 0u : (uint32_t)status);
+   if (NT_SUCCESS(status) && exst.ExecutionState == D3DKMT_DEVICEEXECUTION_ERROR_DMAPAGEFAULT) {
+      D3DKMT_GETDEVICESTATE pfst = { .hDevice = ws->device_h, .StateType = D3DKMT_DEVICESTATE_PAGE_FAULT };
+      if (NT_SUCCESS(WDDM2_DISPATCH(GetDeviceState(&pfst))))
+         fprintf(stderr, "[wddm2:gpu] PAGE_FAULT va=0x%" PRIx64 " err=0x%x vend=%i flags=%u stage=%u\n",
+                 pfst.PageFaultState.FaultedVirtualAddress,
+                 pfst.PageFaultState.FaultErrorCode.GeneralErrorCode,
+                 pfst.PageFaultState.FaultErrorCode.DeviceSpecificCode,
+                 pfst.PageFaultState.PageFaultFlags,
+                 pfst.PageFaultState.FaultedPipelineStage);
+   }
+}
+
 struct PACKED create_context_private_data {
    uint32_t header_size;
    uint32_t reserved[15];
@@ -259,7 +287,11 @@ radv_wddm2_queue_init(struct radv_wddm2_winsys *ws, enum amd_ip_type hw_ip,
        */
       .EngineAffinity = 1,
       .Flags = {
-         .DisableGpuTimeout = true,
+         /* By default allow the KMD watchdog (TDR) to reset the engine on a
+          * genuine hang instead of wedging the whole system with a stuck GPU.
+          * Set RADV_WDDM2_DISABLE_GPU_TIMEOUT=1 to disable the watchdog again
+          * (e.g. for slow frames), matching the old hard-freeze behaviour. */
+         .DisableGpuTimeout = debug_get_bool_option("RADV_WDDM2_DISABLE_GPU_TIMEOUT", false),
       },
       .pPrivateDriverData = &create_context_data,
       .PrivateDriverDataSize = sizeof(create_context_data),
@@ -303,9 +335,14 @@ radv_wddm2_queue_init(struct radv_wddm2_winsys *ws, enum amd_ip_type hw_ip,
             queue->hq_progress_fence_cpu =
                (uint64_t *)create_hw_queue.HwQueueProgressFenceCPUVirtualAddress;
          } else {
+            fprintf(stderr, "radv/wddm2: CreateHwQueue failed 0x%X (node=%u aff=%u)\n",
+                    status, node, 1);
             WDDM2_DISPATCH(DestroyHwContext(&(D3DKMT_DESTROYHWCONTEXT){ .hHwContext = queue->hw_context_h }));
             queue->hw_context_h = 0;
          }
+      } else {
+         fprintf(stderr, "radv/wddm2: CreateHwContext failed 0x%X (node=%u aff=%u pdd_size=%u)\n",
+                 status, node, 1, create_hw_context.PrivateDriverDataSize);
       }
 
       D3DKMT_CREATESYNCHRONIZATIONOBJECT2 create_sync = {
@@ -438,6 +475,13 @@ vk_wddm2_fence_wait(uint32_t device_h, struct vk_wddm2_fence *fence)
          .StateType = D3DKMT_DEVICESTATE_EXECUTION,
       };
       status = WDDM2_DISPATCH(GetDeviceState(&get_state));
+
+      if (result != VK_SUCCESS) {
+         fprintf(stderr, "radv/wddm2: fence wait timed out (fence value %llu wait %llu), exec state 0x%x\n",
+                 (unsigned long long)p_atomic_read(fence->value_map),
+                 (unsigned long long)fence->wait_value,
+                 NT_SUCCESS(status) ? get_state.ExecutionState : 0xffffffff);
+      }
 
       if (NT_SUCCESS(status) && get_state.ExecutionState == D3DKMT_DEVICEEXECUTION_ERROR_DMAPAGEFAULT) {
          get_state.StateType = D3DKMT_DEVICESTATE_PAGE_FAULT;
@@ -585,20 +629,10 @@ radv_wddm2_submit_add_cs(struct radv_wddm2_ctx *ctx, struct submit_pdd_writer *p
    else if (type == RADV_CS_DUMP_TYPE_POSTAMBLE_IBS)
       flags = 0x104;
 
-   if (getenv("RADV_WDDM2_DUMP_MAIN") && type == RADV_CS_DUMP_TYPE_MAIN_IBS)
-      ctx->ws->base.cs_dump(&cs->base, stderr, NULL, 0, type);
-
-   if (ctx->ws->dump_ibs)
-      ctx->ws->base.cs_dump(&cs->base, stderr, NULL, 0, type);
-
 for (unsigned i = 0; i < num_ib_buffers; i++) {
-      struct radv_winsys_ib ib = cs->ib_buffers[i];
+       struct radv_winsys_ib ib = cs->ib_buffers[i];
 
-      if (ctx->ws->dump_ibs)
-         fprintf(stderr, "RADV_WDDM2_DBG   ib[%u] va=0x%llx cdw=%u hw_ip=%u\n", i,
-                 (unsigned long long)ib.va, ib.cdw, cs->hw_ip);
-
-      if (first->va == 0)
+       if (first->va == 0)
          *first = ib;
 
       if (is_gang) {
@@ -710,11 +744,25 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
    struct radv_wddm2_queue *ace_queue = &ctx->ace_queue;
    NTSTATUS status;
 
-   if (getenv("RADV_WDDM2_DBG"))
-      fprintf(stderr, "RADV_WDDM2_DBG submit ip=%u gang=%d cs=%u dump_ibs=%d hwqueue=%llu ctx=%llu\n",
+   if (ctx->ws->dbg)
+      fprintf(stderr, "RADV_WDDM2_DBG submit ip=%u gang=%d cs=%u dump_ibs=%d hwqueue=%llu ctx=%llu wait=%u sig=%u\n",
               submit->ip_type, submit->is_gang ? 1 : 0, submit->cs_count,
               ctx->ws->dump_ibs ? 1 : 0, (unsigned long long)queue->handle,
-              (unsigned long long)queue->context_h);
+              (unsigned long long)queue->context_h, wait_count, signal_count);
+
+   if (ctx->ws->dbg && wait_count > 0) {
+      for (uint32_t i = 0; i < wait_count; i++)
+         fprintf(stderr, "RADV_WDDM2_DBG   wait[%u] handle=0x%llx value=%llu\n", i,
+                 (unsigned long long)vk_sync_as_wddm2_monitored_fence(waits[i].sync)->handle,
+                 (unsigned long long)waits[i].wait_value);
+   }
+
+   if (ctx->ws->dbg && signal_count > 0) {
+      for (uint32_t i = 0; i < signal_count; i++)
+         fprintf(stderr, "RADV_WDDM2_DBG   sig[%u] handle=0x%llx value=%llu\n", i,
+                 (unsigned long long)vk_sync_as_wddm2_monitored_fence(signals[i].sync)->handle,
+                 (unsigned long long)signals[i].signal_value);
+   }
 
    if (ctx->ws->dump_ibs && !ctx->ws->has_dedicated_compute_node &&
        !submit->is_gang && submit->ip_type == AMD_IP_COMPUTE)
@@ -776,10 +824,21 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
       STACK_ARRAY_FINISH(handles);
       STACK_ARRAY_FINISH(values);
 
-      assert(NT_SUCCESS(status));
-      if (!NT_SUCCESS(status))
+      if (!NT_SUCCESS(status)) {
+         fprintf(stderr, "radv/wddm2: SubmitWait failed 0x%X\n", status);
          return VK_ERROR_DEVICE_LOST;
+      }
    }
+
+   /* Serialize the whole submission critical section with deferred BO destroys.
+    * The winsys fence snapshot must be consistent with the kernel state: a
+    * destroy racing a submit must either see the just-queued IB (and defer the
+    * destroy) or run strictly before any IB is handed to the kernel - it must
+    * never observe an "idle" device between SubmitCommand and the fence publish,
+    * otherwise the VA of the just-submitted IB gets freed while the GPU can still
+    * reference it (use-after-free -> GPU page fault -> D3DKMT_DEVICEEXECUTION_HUNG).
+    * deferred_mtx is held across SubmitCommand + Signal + publish. */
+   simple_mtx_lock(&ctx->ws->deferred_mtx);
 
    if (submit->cs_count > 0) {
       struct radv_winsys_ib first_ib = {};
@@ -817,7 +876,12 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
          status = WDDM2_DISPATCH(SubmitCommand(&wddm2_submit));          
       }
       if (!NT_SUCCESS(status)) {
-         fprintf(stderr, "SubmitCommand: VK_ERROR_DEVICE_LOST\n");
+         fprintf(stderr, "radv/wddm2: SubmitCommand failed 0x%X hwqueue=%llu va=0x%llx len=%u\n",
+                 status, (unsigned long long)queue->handle,
+                 (unsigned long long)first_ib.va, first_ib.cdw * 4);
+         if (status == (NTSTATUS)0xC01E0200L)
+            radv_wddm2_dump_gpu_exception(ctx->ws);
+         simple_mtx_unlock(&ctx->ws->deferred_mtx);
          return VK_ERROR_DEVICE_LOST;
       }
    }
@@ -857,25 +921,38 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
       STACK_ARRAY_FINISH(handles);
       STACK_ARRAY_FINISH(values);
 
-      assert(NT_SUCCESS(status));
-      if (!NT_SUCCESS(status))
+      if (!NT_SUCCESS(status)) {
+         fprintf(stderr, "radv/wddm2: SubmitSignal failed 0x%X\n", status);
+         simple_mtx_unlock(&ctx->ws->deferred_mtx);
          return VK_ERROR_DEVICE_LOST;
+      }
 
       struct vk_wddm2_monitored_fence *fence = vk_sync_as_wddm2_monitored_fence(signals[0].sync);
-      ctx->per_ip[submit->ip_type].last_submission.handle = fence->handle;
-      ctx->per_ip[submit->ip_type].last_submission.wait_value = signals[0].signal_value;
-      ctx->per_ip[submit->ip_type].last_submission.value_map = fence->value_map;
+      struct vk_wddm2_fence new_last = {
+         .handle = fence->handle,
+         .wait_value = signals[0].signal_value,
+         .value_map = fence->value_map,
+      };
 
       /* Publish the last submission fence at the winsys level so deferred BO
        * destruction can retire once the GPU has passed this point, preventing a
-       * chained IB VA from being reused while still referenced. */
-      ctx->ws->last_submission[submit->ip_type] = ctx->per_ip[submit->ip_type].last_submission;
+       * chained IB VA from being reused while still referenced.  deferred_mtx is
+       * already held (acquired before SubmitCommand), so a concurrent destroy
+       * snapshots a consistent state. */
+      ctx->per_ip[submit->ip_type].last_submission = new_last;
+      ctx->ws->last_submission[submit->ip_type] = new_last;
+      /* Standalone compute is routed on the GFX ring on single-node parts
+       * (ACE-ON-GFX), so the GFX slot must track the same progress fence. */
       if (!submit->is_gang && submit->ip_type == AMD_IP_COMPUTE) {
-         ctx->per_ip[AMD_IP_GFX].last_submission = ctx->per_ip[submit->ip_type].last_submission;
-         ctx->ws->last_submission[AMD_IP_GFX] = ctx->per_ip[submit->ip_type].last_submission;
+         ctx->per_ip[AMD_IP_GFX].last_submission = new_last;
+         ctx->ws->last_submission[AMD_IP_GFX] = new_last;
       }
-      radv_wddm2_bo_deferred_drain(ctx->ws);
    }
+
+   simple_mtx_unlock(&ctx->ws->deferred_mtx);
+
+   if (signal_count > 0)
+      radv_wddm2_bo_deferred_drain(ctx->ws);
 
    return VK_SUCCESS;
 }

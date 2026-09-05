@@ -47,6 +47,16 @@ struct vk_wddm2_fence {
 
 bool vk_wddm2_fence_wait(uint32_t device_h, struct vk_wddm2_fence *fence);
 
+/* Last-N submitted IB snapshot (probe only, see radv_wddm2_cs.c submit path).
+ * Kernels are copied verbatim at submit time so a later device-hang DIAG can
+ * dump the IB that was executing. */
+struct radv_wddm2_last_ib {
+   uint32_t ip;
+   uint64_t ib_va;
+   uint32_t cdw;
+   uint32_t ib_buf[4096];
+};
+
 struct vk_device;
 void radv_wddm2_notify_fence_destroyed(void *winsys, struct vk_device *device,
                                        uint32_t handle, uint64_t *value_map);
@@ -71,6 +81,7 @@ struct radv_wddm2_winsys {
    bool debug_log_bos;
    bool chain_ib;
    bool dump_ibs;
+   bool dbg;                    /* cached RADV_WDDM2_DBG env var */
 
    uint32_t adapter_h;
    LUID adapter_luid;
@@ -111,8 +122,15 @@ struct radv_wddm2_winsys {
    uint64_t alloc_vram_vis;
    uint64_t alloc_gtt;
 
+   simple_mtx_t va_mtx;
+   uint64_t va_live;
+   uint64_t va_mapped_total;
+   uint64_t va_freed_total;
+
    simple_mtx_t deferred_mtx;
    struct list_head deferred_list;
+
+   simple_mtx_t d3d_mtx;
 
    struct vk_wddm2_fence last_submission[AMD_NUM_IP_TYPES];
 
