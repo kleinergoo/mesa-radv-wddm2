@@ -340,7 +340,7 @@ icd_command = [
   prog_python, '@INPUT0@',
   '--api-version', '1.4', '--xml', '@INPUT1@',
   '--sizeof-pointer', sizeof_pointer,
-  '--icd-lib-path', vulkan_icd_lib_path,
+  '--icd-lib-path', '.',
   '--icd-filename', icd_file_name,
   '--out', '@OUTPUT@',
 ]
