@@ -139,6 +139,7 @@ struct wsi_device {
    } x11;
 
    struct {
+      void *(*get_d3d12_device)(VkDevice device);
       void *(*get_d3d12_command_queue)(VkDevice device);
       /* Needs to be per VkDevice, not VkPhysicalDevice, depends on queue config */
       bool (*requires_blits)(VkDevice device);

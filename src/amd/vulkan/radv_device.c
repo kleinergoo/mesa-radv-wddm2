@@ -1939,6 +1939,39 @@ radv_GetMemoryFdPropertiesKHR(VkDevice _device, VkExternalMemoryHandleTypeFlagBi
    }
 }
 
+#ifdef _WIN32
+VKAPI_ATTR VkResult VKAPI_CALL
+radv_GetMemoryWin32HandlePropertiesKHR(VkDevice _device,
+                                       VkExternalMemoryHandleTypeFlagBits handleType,
+                                       HANDLE handle,
+                                       VkMemoryWin32HandlePropertiesKHR *pMemoryWin32HandleProperties)
+{
+   VK_FROM_HANDLE(radv_device, device, _device);
+   struct radv_physical_device *pdev = radv_device_physical(device);
+
+   switch (handleType) {
+   case VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D12_RESOURCE_BIT: {
+      enum radeon_bo_domain domains;
+      enum radeon_bo_flag flags;
+      if (!device->ws->buffer_get_flags_from_handle(device->ws, handle, &domains, &flags))
+         return vk_error(device, VK_ERROR_INVALID_EXTERNAL_HANDLE);
+
+      pMemoryWin32HandleProperties->memoryTypeBits = radv_compute_valid_memory_types(pdev, domains, flags);
+      return VK_SUCCESS;
+   }
+   default:
+      /* The valid usage section for this function says:
+       *
+       *    "handleType must not be one of the handle types defined as
+       *    opaque."
+       *
+       * So opaque handle types fall into the default "unsupported" case.
+       */
+      return vk_error(device, VK_ERROR_INVALID_EXTERNAL_HANDLE);
+   }
+}
+#endif
+
 bool
 radv_device_set_pstate(struct radv_device *device, bool enable)
 {

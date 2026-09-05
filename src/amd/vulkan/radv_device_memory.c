@@ -83,6 +83,10 @@ radv_alloc_memory(struct radv_device *device, const VkMemoryAllocateInfo *pAlloc
    assert(pAllocateInfo->sType == VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO);
 
    const VkImportMemoryFdInfoKHR *import_info = vk_find_struct_const(pAllocateInfo->pNext, IMPORT_MEMORY_FD_INFO_KHR);
+#ifdef _WIN32
+   const VkImportMemoryWin32HandleInfoKHR *win32_import_info =
+      vk_find_struct_const(pAllocateInfo->pNext, IMPORT_MEMORY_WIN32_HANDLE_INFO_KHR);
+#endif
    const VkMemoryDedicatedAllocateInfo *dedicate_info =
       vk_find_struct_const(pAllocateInfo->pNext, MEMORY_DEDICATED_ALLOCATE_INFO);
    const VkExportMemoryAllocateInfo *export_info =
@@ -169,16 +173,35 @@ radv_alloc_memory(struct radv_device *device, const VkMemoryAllocateInfo *pAlloc
       if (result != VK_SUCCESS)
          goto fail;
       mem->export_handle_type = export_info->handleTypes;
-   } else if (import_info) {
-      assert(import_info->handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT ||
-             import_info->handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT);
-      result = radv_bo_from_fd(device, import_info->fd, priority, mem, NULL);
-      if (result != VK_SUCCESS) {
-         goto fail;
-      } else {
-         close(import_info->fd);
+   } else if (import_info
+#ifdef _WIN32
+              || win32_import_info
+#endif
+              ) {
+      if (import_info) {
+         assert(import_info->handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT ||
+                import_info->handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT);
+         result = radv_bo_from_fd(device, import_info->fd, priority, mem, NULL);
+         if (result != VK_SUCCESS) {
+            goto fail;
+         } else {
+            close(import_info->fd);
+         }
+         mem->import_handle_type = import_info->handleType;
       }
-      mem->import_handle_type = import_info->handleType;
+#ifdef _WIN32
+      else {
+         assert(win32_import_info->handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT_KHR ||
+                win32_import_info->handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D12_RESOURCE_BIT_KHR);
+         result = radv_bo_from_handle(device, win32_import_info->handle, priority, mem, NULL);
+         if (result != VK_SUCCESS) {
+            goto fail;
+         } else {
+            CloseHandle(win32_import_info->handle);
+         }
+         mem->import_handle_type = win32_import_info->handleType;
+      }
+#endif
 
       if (mem->image && mem->image->plane_count == 1 && !vk_format_is_depth_or_stencil(mem->image->vk.format) &&
           mem->image->vk.samples == 1 && mem->image->vk.tiling != VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT) {

@@ -3224,7 +3224,8 @@ wsi_cmd_blit_image_to_buffer(VkCommandBuffer cmd_buffer,
                              uint32_t qfi)
 {
    assert(info->image_type == WSI_IMAGE_TYPE_CPU ||
-          info->image_type == WSI_IMAGE_TYPE_DRM);
+          info->image_type == WSI_IMAGE_TYPE_DRM ||
+          info->image_type == WSI_IMAGE_TYPE_DXGI);
 
    VkImageMemoryBarrier img_mem_barrier = {
       .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,

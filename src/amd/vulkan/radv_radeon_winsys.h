@@ -255,8 +255,14 @@ struct radeon_winsys {
 
    bool (*buffer_get_fd)(struct radeon_winsys *ws, struct radeon_winsys_bo *bo, int *fd);
 
+   VkResult (*buffer_from_handle)(struct radeon_winsys *ws, void *handle, unsigned priority,
+                                  struct radeon_winsys_bo **out_bo, uint64_t *alloc_size);
+
    bool (*buffer_get_flags_from_fd)(struct radeon_winsys *ws, int fd, enum radeon_bo_domain *domains,
                                     enum radeon_bo_flag *flags);
+
+   bool (*buffer_get_flags_from_handle)(struct radeon_winsys *ws, void *handle, enum radeon_bo_domain *domains,
+                                        enum radeon_bo_flag *flags);
 
    void (*buffer_unmap)(struct radeon_winsys *ws, struct radeon_winsys_bo *bo, bool replace);
 

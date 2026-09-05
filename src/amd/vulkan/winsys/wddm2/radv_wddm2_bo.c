@@ -692,6 +692,159 @@ radv_wddm2_bo_get_flags_from_fd(struct radeon_winsys *_ws, int fd,
    return false;
 }
 
+static VkResult
+radv_wddm2_bo_from_handle(struct radeon_winsys *_ws, void *handle, unsigned priority,
+                          struct radeon_winsys_bo **out_bo, uint64_t *alloc_size)
+{
+   struct radv_wddm2_winsys *ws = radv_wddm2_winsys(_ws);
+   struct radv_wddm2_bo *bo;
+   NTSTATUS status;
+   VkResult result;
+
+   *out_bo = NULL;
+
+   bo = CALLOC_STRUCT(radv_wddm2_bo);
+   if (!bo)
+      return VK_ERROR_OUT_OF_HOST_MEMORY;
+
+   bo->base.initial_domain = RADEON_DOMAIN_VRAM;
+   bo->ws = ws;
+   bo->flags = 0;
+
+   /* Query resource info to determine private data sizes */
+   D3DKMT_QUERYRESOURCEINFOFROMNTHANDLE query_info = {
+      .hDevice = ws->device_h,
+      .hNtHandle = (HANDLE)handle,
+   };
+   status = WDDM2_DISPATCH(QueryResourceInfoFromNtHandle(&query_info));
+   if (!NT_SUCCESS(status)) {
+      fprintf(stderr, "QueryResourceInfoFromNtHandle failed 0x%X\n", status);
+      result = VK_ERROR_INVALID_EXTERNAL_HANDLE;
+      goto error_alloc;
+   }
+
+   /* Allocate buffer for private driver data.
+    * Lay out the four WDDM buffers back-to-back so they do not overlap:
+    *   [total private driver data] [resource private driver data]
+    *   [private runtime data]      [open allocation info array]
+    */
+   size_t pd_size = query_info.TotalPrivateDriverDataSize;
+   size_t res_size = query_info.ResourcePrivateDriverDataSize;
+   size_t rt_size = query_info.PrivateRuntimeDataSize;
+   size_t ai_size = query_info.NumAllocations * sizeof(D3DDDI_OPENALLOCATIONINFO2);
+   void *pdata = calloc(1, pd_size + res_size + rt_size + ai_size);
+   if (!pdata) {
+      result = VK_ERROR_OUT_OF_HOST_MEMORY;
+      goto error_alloc;
+   }
+   void *res_pdata = (uint8_t *)pdata + pd_size;
+   void *runtime_data = (uint8_t *)res_pdata + res_size;
+   D3DDDI_OPENALLOCATIONINFO2 *alloc_info =
+      (D3DDDI_OPENALLOCATIONINFO2 *)((uint8_t *)runtime_data + rt_size);
+
+   D3DKMT_OPENRESOURCEFROMNTHANDLE open_resource = {
+      .hDevice = ws->device_h,
+      .hNtHandle = (HANDLE)handle,
+      .NumAllocations = query_info.NumAllocations,
+      .pOpenAllocationInfo2 = alloc_info,
+      .TotalPrivateDriverDataBufferSize = query_info.TotalPrivateDriverDataSize,
+      .pTotalPrivateDriverDataBuffer = pdata,
+      .ResourcePrivateDriverDataSize = query_info.ResourcePrivateDriverDataSize,
+      .pResourcePrivateDriverData = res_pdata,
+      .PrivateRuntimeDataSize = query_info.PrivateRuntimeDataSize,
+      .pPrivateRuntimeData = runtime_data,
+   };
+   status = WDDM2_DISPATCH(OpenResourceFromNtHandle(&open_resource));
+   if (!NT_SUCCESS(status)) {
+      result = VK_ERROR_INVALID_EXTERNAL_HANDLE;
+      goto error_import;
+   }
+
+   struct alloc_entry *entry = (struct alloc_entry *)((uint8_t *) pdata + sizeof(struct alloc_header));
+
+   bo->base.obj_id = bo->base.handle = alloc_info[0].hAllocation;
+   bo->base.size = entry->bo_info.phys_size;
+
+   /* Map the opened allocation into GPU virtual address space */
+   D3DDDI_MAPGPUVIRTUALADDRESS map = {
+      .hPagingQueue = ws->paging_queue_h,
+      .MinimumAddress = RADV_WDDM2_HEAP_START,
+      .MaximumAddress = RADV_WDDM2_REPLAY_HEAP_START,
+      .hAllocation = bo->base.handle,
+      .SizeInPages = bo->base.size / 4096,
+      .Protection = {
+         .Write = 1,
+      },
+   };
+   status = WDDM2_DISPATCH(MapGpuVirtualAddress(&map));
+   if (!NT_SUCCESS(status)) {
+      result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+      goto error_import;
+   }
+   bo->base.va = map.VirtualAddress;
+
+   if (alloc_size)
+      *alloc_size = bo->base.size;
+
+   /* Make the allocation resident */
+   D3DDDI_MAKERESIDENT make_resident = {
+      .hPagingQueue = ws->paging_queue_h,
+      .NumAllocations = 1,
+      .AllocationList = &bo->base.handle,
+      .Flags = {
+         .MustSucceed = 1,
+      },
+   };
+   status = WDDM2_DISPATCH(MakeResident(&make_resident));
+   if (!NT_SUCCESS(status)) {
+      result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+      goto error_map;
+   }
+
+   /* Wait for the paging operation to complete */
+   result = radv_wddm2_wait_paging_fence(ws, make_resident.PagingFenceValue);
+   if (result != VK_SUCCESS)
+      goto error_map;
+
+   free(pdata);
+   *out_bo = &bo->base;
+   return VK_SUCCESS;
+
+error_map:
+   {
+      const D3DKMT_FREEGPUVIRTUALADDRESS unmap = {
+         .hAdapter = ws->adapter_h,
+         .BaseAddress = bo->base.va,
+         .Size = bo->base.size,
+      };
+      WDDM2_DISPATCH(FreeGpuVirtualAddress(&unmap));
+   }
+error_import:
+   {
+      const D3DKMT_DESTROYALLOCATION2 destroy = {
+         .hDevice = ws->device_h,
+         .phAllocationList = &bo->base.handle,
+         .AllocationCount = 1,
+      };
+      WDDM2_DISPATCH(DestroyAllocation2(&destroy));
+      free(pdata);
+   }
+error_alloc:
+   FREE(bo);
+   return result;
+}
+
+static bool
+radv_wddm2_bo_get_flags_from_handle(struct radeon_winsys *_ws, void *handle,
+                                    enum radeon_bo_domain *domains,
+                                    enum radeon_bo_flag *flags)
+{
+   *domains = RADEON_DOMAIN_VRAM;
+   *flags = RADEON_FLAG_CPU_ACCESS;
+
+   return true;
+}
+
 static bool
 radv_wddm2_bo_wait_for_idle(struct radeon_winsys *_ws, struct radeon_winsys_bo *_bo)
 {
@@ -1097,6 +1250,8 @@ radv_wddm2_bo_init_functions(struct radv_wddm2_winsys *ws)
    ws->base.buffer_from_ptr = radv_wddm2_bo_from_ptr;
    ws->base.buffer_from_fd = radv_wddm2_bo_from_fd;
    ws->base.buffer_get_fd = radv_wddm2_bo_get_fd;
+   ws->base.buffer_from_handle = radv_wddm2_bo_from_handle;
+   ws->base.buffer_get_flags_from_handle = radv_wddm2_bo_get_flags_from_handle;
    ws->base.buffer_get_flags_from_fd = radv_wddm2_bo_get_flags_from_fd;
    ws->base.buffer_set_metadata = radv_wddm2_bo_set_metadata;
    ws->base.buffer_get_metadata = radv_wddm2_bo_get_metadata;

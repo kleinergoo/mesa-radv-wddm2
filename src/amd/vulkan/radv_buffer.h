@@ -44,6 +44,11 @@ void radv_bo_destroy(struct radv_device *device, struct vk_object_base *object, 
 VkResult radv_bo_from_fd(struct radv_device *device, int fd, unsigned priority, struct radv_device_memory *mem,
                          uint64_t *alloc_size);
 
+#ifdef _WIN32
+VkResult radv_bo_from_handle(struct radv_device *device, HANDLE handle, unsigned priority,
+                             struct radv_device_memory *mem, uint64_t *alloc_size);
+#endif
+
 VkResult radv_bo_from_ptr(struct radv_device *device, void *host_ptr, uint64_t alloc_size, unsigned priority,
                           struct radv_device_memory *mem);
 
