@@ -57,6 +57,7 @@ vulkan_lite_runtime_deps = [
 vulkan_lite_runtime_inc = [
   inc_include,
   inc_src,
+  inc_shared,
 ]
 
 if dep_libdrm.found()

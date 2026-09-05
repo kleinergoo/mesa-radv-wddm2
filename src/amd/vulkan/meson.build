@@ -296,7 +296,8 @@ libvulkan_radeon = shared_library(
   vs_module_defs : vulkan_api_def,
   include_directories : [
     inc_include, inc_src, inc_amd, inc_amd_common, inc_amd_common_llvm,
-    inc_util, inc_virtio_gpu, include_directories('winsys/common')
+    inc_util, inc_virtio_gpu, include_directories('winsys/common'),
+    inc_shared,
   ],
   link_with : [
     libamd_common, libamd_common_llvm, libamdgpu_addrlib,

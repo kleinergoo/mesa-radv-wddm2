@@ -56,6 +56,10 @@ if host_machine.cpu_family() in ['x86', 'x86_64', 'aarch64']
   cpp_args_addrlib += '-DADDR_ALLOW_SIMD=1'
 endif
 
+if host_machine.cpu_family() in ['x86', 'x86_64']
+  cpp_args_addrlib += cpp.get_supported_arguments(['-mbmi'])
+endif
+
 if host_machine.endian() == 'little'
   cpp_args_addrlib += '-DLITTLEENDIAN_CPU'
 else

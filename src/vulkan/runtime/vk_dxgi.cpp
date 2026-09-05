@@ -26,6 +26,7 @@
 #include <windows.h>
 #include <dxgi1_4.h>
 #include <directx/d3d12.h>
+#include <dxguids/dxguids.h>
 
 static IDXGIFactory4 *
 vk_dxgi_get_factory(bool debug)
