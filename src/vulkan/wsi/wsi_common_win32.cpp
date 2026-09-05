@@ -456,6 +456,10 @@ convert_to_dxgi_format(VkFormat vk_format)
       return DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
    case VK_FORMAT_B8G8R8A8_UNORM:
       return DXGI_FORMAT_B8G8R8A8_UNORM;
+   case VK_FORMAT_R8G8B8A8_SRGB:
+      return DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+   case VK_FORMAT_R8G8B8A8_UNORM:
+      return DXGI_FORMAT_R8G8B8A8_UNORM;
    default:
       return DXGI_FORMAT_UNKNOWN;
    }
@@ -1172,10 +1176,14 @@ wsi_win32_surface_create_swapchain_dxgi(
       break;
    }
 
+   DXGI_FORMAT swapchain_format = convert_to_dxgi_format(create_info->imageFormat);
+   if (swapchain_format == DXGI_FORMAT_UNKNOWN)
+      swapchain_format = DXGI_FORMAT_B8G8R8A8_UNORM;
+
    DXGI_SWAP_CHAIN_DESC1 desc = {
       create_info->imageExtent.width,
       create_info->imageExtent.height,
-      DXGI_FORMAT_B8G8R8A8_UNORM,
+      swapchain_format,
       create_info->imageArrayLayers > 1,  // Stereo
       { 1 },                              // SampleDesc
       0,                                  // Usage (filled in below)
