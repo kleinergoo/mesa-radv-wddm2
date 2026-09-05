@@ -33,6 +33,7 @@
 #include "vk_sync.h"
 
 struct radeon_winsys;
+struct vk_device;
 struct vk_dx_adapter_info;
 
 struct radeon_winsys_info {
@@ -40,6 +41,9 @@ struct radeon_winsys_info {
    struct vk_sync_type syncobj_sync_type;
    uint32_t global_priority_mask;
 };
+
+void radv_wddm2_notify_fence_destroyed(void *winsys, struct vk_device *device,
+                                       uint32_t handle, uint64_t *value_map);
 
 VkResult radv_wddm2_winsys_query_info(const struct vk_dx_adapter_info *adapter_info,
                                       uint64_t debug_flags, struct radeon_winsys_info *info);

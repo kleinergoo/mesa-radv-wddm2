@@ -242,6 +242,14 @@ struct vk_device {
    /* Set by vk_device_set_wddm2_handle() */
    uint32_t wddm2_handle;
 
+   /* Set by vk_device_set_wddm2_winsys().  Lets the WDDM2 monitored-fence
+    * runtime invalidate winsys deferral snapshots (last_submission and
+    * deferred BO entries) that may be referencing a fence about to be
+    * destroyed, before its CPU value mapping is torn down. */
+   void *wddm2_winsys;
+   void (*wddm2_notify_fence_destroyed)(void *winsys, struct vk_device *device,
+                                        uint32_t handle, uint64_t *value_map);
+
    /** Implicit pipeline cache, or NULL */
    struct vk_pipeline_cache *mem_cache;
 
@@ -366,6 +374,17 @@ static inline void
 vk_device_set_wddm2_handle(struct vk_device *device, uint32_t handle)
 {
    device->wddm2_handle = handle;
+}
+
+static inline void
+vk_device_set_wddm2_winsys(struct vk_device *device, void *winsys,
+                           void (*notify_fence_destroyed)(void *winsys,
+                                                          struct vk_device *device,
+                                                          uint32_t handle,
+                                                          uint64_t *value_map))
+{
+   device->wddm2_winsys = winsys;
+   device->wddm2_notify_fence_destroyed = notify_fence_destroyed;
 }
 
 /** Tears down a vk_device

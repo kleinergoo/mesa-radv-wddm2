@@ -1528,6 +1528,10 @@ radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCr
    if (device->ws->get_wddm2_handle)
       vk_device_set_wddm2_handle(&device->vk, device->ws->get_wddm2_handle(device->ws));
 
+   if (device->ws->get_wddm2_handle)
+      vk_device_set_wddm2_winsys(&device->vk, device->ws,
+                                 radv_wddm2_notify_fence_destroyed);
+
    /* Disable unordered submits when SQTT queue events are enabled because queue present events
     * might be missing otherwise.
     */

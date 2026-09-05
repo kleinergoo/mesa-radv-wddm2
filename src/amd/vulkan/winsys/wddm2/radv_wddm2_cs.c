@@ -397,7 +397,7 @@ radv_wddm2_ctx_set_pstate(struct radeon_winsys_ctx *rwctx, uint32_t pstate)
    return 0;
 }
 
-static bool
+bool
 vk_wddm2_fence_wait(uint32_t device_h, struct vk_wddm2_fence *fence)
 {
    VkResult result;

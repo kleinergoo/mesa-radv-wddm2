@@ -182,6 +182,19 @@ vk_wddm2_monitored_fence_finish(struct vk_device *device,
 {
    struct vk_wddm2_monitored_fence *fence = to_wddm2_monitored_fence(sync);
 
+   /*
+    * The winsys keeps by-value snapshots of this fence (last_submission and
+    * deferred BO entries) so that destroyed BOs can be held until the GPU
+    * passes the point that last referenced them.  Those snapshots dereference
+    * fence->value_map, whose CPU mapping is torn down by
+    * DestroySynchronizationObject below.  Invalidate every snapshot that
+    * still references this fence *before* the mapping goes away, waiting out
+    * any GPU work so dropping the deferral is safe.
+    */
+   if (device->wddm2_notify_fence_destroyed)
+      device->wddm2_notify_fence_destroyed(device->wddm2_winsys, device,
+                                           fence->handle, fence->value_map);
+
 #ifdef _WIN32
    if (fence->shared_handle) {
       ASSERTED BOOL ok = CloseHandle(fence->shared_handle);

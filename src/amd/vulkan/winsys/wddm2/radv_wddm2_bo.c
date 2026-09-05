@@ -35,6 +35,7 @@
 #include "radv_wddm2_cs.h"
 #include "util/u_memory.h"
 #include "vk_async_event.h"
+#include "vk_device.h"
 
 /* Xlib headers conflict with DXGI headers */
 #ifdef Status
@@ -1046,6 +1047,100 @@ radv_wddm2_deferred_drain(struct radv_wddm2_winsys *ws)
    list_inithead(&done);
 
    radv_wddm2_deferred_collect(ws, &done, false);
+}
+
+/* Monitored-fence destroy notification, wired up by radv_device.  The winsys
+ * keeps by-value snapshots of submission fences (last_submission and deferred
+ * BO entries) which dereference fence->value_map.  When such a fence is about
+ * to be destroyed, DestroySynchronizationObject tears down that CPU mapping,
+ * so any later drain would dereference a dangling address.  Wait until the GPU
+ * has passed the highest wait point referenced on this fence, then clear every
+ * snapshot so dropping the deferral protection is safe. */
+void
+radv_wddm2_notify_fence_destroyed(void *winsys, struct vk_device *device,
+                                  uint32_t handle, uint64_t *value_map)
+{
+   struct radv_wddm2_winsys *ws = winsys;
+   struct vk_wddm2_fence wait = { .handle = handle };
+   uint64_t max_wait = 0;
+   bool found = false;
+   struct list_head done;
+   struct radv_wddm2_deferred_bo *d, *tmp;
+
+   if (handle == 0)
+      return;
+
+   for (unsigned ip = 0; ip < AMD_NUM_IP_TYPES; ip++) {
+      struct vk_wddm2_fence *last = &ws->last_submission[ip];
+      if (last->handle == handle) {
+         if (last->wait_value > max_wait)
+            max_wait = last->wait_value;
+         found = true;
+      }
+   }
+
+   if (ws->default_ctx) {
+      for (unsigned ip = 0; ip < AMD_NUM_IP_TYPES; ip++) {
+         struct vk_wddm2_fence *last = &ws->default_ctx->per_ip[ip].last_submission;
+         if (last->handle == handle) {
+            if (last->wait_value > max_wait)
+               max_wait = last->wait_value;
+            found = true;
+         }
+      }
+   }
+
+   simple_mtx_lock(&ws->deferred_mtx);
+   LIST_FOR_EACH_ENTRY_SAFE(d, tmp, &ws->deferred_list, list) {
+      if (d->fence.handle == handle) {
+         if (d->fence.wait_value > max_wait)
+            max_wait = d->fence.wait_value;
+         found = true;
+      }
+   }
+   simple_mtx_unlock(&ws->deferred_mtx);
+
+   if (!found)
+      return;
+
+   if (max_wait > 0 && value_map) {
+      wait.wait_value = max_wait;
+      wait.value_map = value_map;
+      vk_wddm2_fence_wait(device->wddm2_handle, &wait);
+   }
+
+   list_inithead(&done);
+
+   simple_mtx_lock(&ws->deferred_mtx);
+   for (unsigned ip = 0; ip < AMD_NUM_IP_TYPES; ip++) {
+      struct vk_wddm2_fence *last = &ws->last_submission[ip];
+      if (last->handle == handle) {
+         last->handle = 0;
+         last->wait_value = 0;
+         last->value_map = NULL;
+      }
+   }
+
+   if (ws->default_ctx) {
+      for (unsigned ip = 0; ip < AMD_NUM_IP_TYPES; ip++) {
+         struct vk_wddm2_fence *last = &ws->default_ctx->per_ip[ip].last_submission;
+         if (last->handle == handle) {
+            last->handle = 0;
+            last->wait_value = 0;
+            last->value_map = NULL;
+         }
+      }
+   }
+
+   LIST_FOR_EACH_ENTRY_SAFE(d, tmp, &ws->deferred_list, list) {
+      if (d->fence.handle == handle) {
+         list_del(&d->list);
+         list_addtail(&d->list, &done);
+      }
+   }
+   simple_mtx_unlock(&ws->deferred_mtx);
+
+   radv_wddm2_deferred_dispose(ws, &done);
 }
 
 static void

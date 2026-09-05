@@ -45,6 +45,12 @@ struct vk_wddm2_fence {
    uint64_t *value_map;
 };
 
+bool vk_wddm2_fence_wait(uint32_t device_h, struct vk_wddm2_fence *fence);
+
+struct vk_device;
+void radv_wddm2_notify_fence_destroyed(void *winsys, struct vk_device *device,
+                                       uint32_t handle, uint64_t *value_map);
+
 /* A BO whose real destroy (VA free / allocation destroy) has been deferred so a
  * still-in-flight submit that references its VA via an INDIRECT_BUFFER chain can
  * never dangle into a reused address. Freed once the tagged fence retires. */
