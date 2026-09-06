@@ -36,6 +36,8 @@
 #include "wsi_common_entrypoints.h"
 #include "wsi_common_private.h"
 
+#include <windows.h>
+
 #include <dxgi1_4.h>
 #include <directx/d3d12.h>
 #include <dxguids/dxguids.h>
@@ -1054,6 +1056,9 @@ wsi_win32_queue_present_dxgi(struct wsi_win32_swapchain *chain,
 
    image->state = WSI_IMAGE_QUEUED;
 
+   if (getenv("RADV_WSI_DEBUG"))
+      fprintf(stderr, "W32P enter idx=%u mode=%u blit=%d\n", (unsigned)((uintptr_t)image - (uintptr_t)chain->images) / (unsigned)sizeof(*chain->images), chain->base.present_mode, chain->base.blit.type);
+
    if (chain->base.blit.type != WSI_SWAPCHAIN_NO_BLIT) {
       /* The generic WSI path submitted the RADV image -> blit.buffer copy on
        * the presenting queue and signaled the throttle fence for this image
@@ -1064,6 +1069,8 @@ wsi_win32_queue_present_dxgi(struct wsi_win32_swapchain *chain,
          (uint32_t)sizeof(*chain->images);
       VkResult vres = chain->wsi->wsi->WaitForFences(
          chain->base.device, 1, &chain->base.fences[image_index], true, ~0ull);
+      if (getenv("RADV_WSI_DEBUG"))
+         fprintf(stderr, "W32P radv fence wait done vres=%d\n", (int)vres);
       if (vres != VK_SUCCESS)
          return vres;
 
@@ -1073,6 +1080,8 @@ wsi_win32_queue_present_dxgi(struct wsi_win32_swapchain *chain,
       ID3D12CommandList *cmd_lists[] = {
          (ID3D12CommandList *)image->dxgi.cmd_list,
       };
+      if (getenv("RADV_WSI_DEBUG"))
+         fprintf(stderr, "W32P executing d3d12 cmdlist %p on queue %p\n", (void*)image->dxgi.cmd_list, (void*)d3d12_queue);
       d3d12_queue->ExecuteCommandLists(1, cmd_lists);
    }
 
@@ -1080,7 +1089,11 @@ wsi_win32_queue_present_dxgi(struct wsi_win32_swapchain *chain,
    UINT present_flags = chain->base.present_mode == VK_PRESENT_MODE_IMMEDIATE_KHR ?
       DXGI_PRESENT_ALLOW_TEARING : 0;
 
+   if (getenv("RADV_WSI_DEBUG"))
+      fprintf(stderr, "W32P calling Present1(sync=%u flags=0x%x) on dxgi %p ...\n", (unsigned)sync_interval, (unsigned)present_flags, (void*)chain->dxgi);
    HRESULT hres = chain->dxgi->Present1(sync_interval, present_flags, &params);
+   if (getenv("RADV_WSI_DEBUG"))
+      fprintf(stderr, "W32P Present1 returned hr=0x%08lx\n", (unsigned long)hres);
    switch (hres) {
    case DXGI_ERROR_DEVICE_REMOVED: return VK_ERROR_DEVICE_LOST;
    case E_OUTOFMEMORY: return VK_ERROR_OUT_OF_DEVICE_MEMORY;
@@ -1342,10 +1355,30 @@ fail:
    return result;
 }
 
+/* Load a system DLL by absolute path. In DXVK-based apps the directory of the
+ * executable contains a proxied DXGI.dll/D3D11.dll, so a plain LoadLibrary("DXGI.dll")
+ * would hand the driver DXVK's DXGI instead of the real system one, which can
+ * deadlock. Loading the real system image by full path avoids that.
+ */
+static HMODULE
+wsi_load_system_dll(const char *name)
+{
+   char sysdir[MAX_PATH];
+   UINT len = GetSystemDirectoryA(sysdir, ARRAY_SIZE(sysdir));
+   if (len == 0 || len >= MAX_PATH)
+      return NULL;
+
+   char path[MAX_PATH];
+   if (snprintf(path, sizeof(path), "%s\\%s", sysdir, name) >= (int)sizeof(path))
+      return NULL;
+
+   return LoadLibraryExA(path, NULL, LOAD_WITH_ALTERED_SEARCH_PATH);
+}
+
 static IDXGIFactory4 *
 dxgi_get_factory(bool debug)
 {
-   HMODULE dxgi_mod = LoadLibraryA("DXGI.DLL");
+   HMODULE dxgi_mod = wsi_load_system_dll("dxgi.dll");
    if (!dxgi_mod) {
       return NULL;
    }
@@ -1374,7 +1407,7 @@ dxgi_get_factory(bool debug)
 static IDCompositionDevice *
 dcomp_get_device()
 {
-   HMODULE dcomp_mod = LoadLibraryA("DComp.DLL");
+   HMODULE dcomp_mod = wsi_load_system_dll("dcomp.dll");
    if (!dcomp_mod) {
       return NULL;
    }

@@ -85,7 +85,8 @@ winsys_luid_key(const LUID *luid)
 }
 
 /* GPU-alive watchdog: polls GetDeviceState every 200ms. If the engine is
- * HUNG or RESET, kills the process immediately so DWM doesn't freeze. */
+ * HUNG or RESET, dumps whatever execution/page-fault state the KMD reports
+ * (faulted VA, pipeline stage) and kills the process so DWM doesn't freeze. */
 static DWORD WINAPI
 radv_wddm2_watchdog_thread(LPVOID param)
 {
@@ -100,9 +101,30 @@ radv_wddm2_watchdog_thread(LPVOID param)
       if (NT_SUCCESS(status) &&
           (get_state.ExecutionState == D3DKMT_DEVICEEXECUTION_HUNG ||
            get_state.ExecutionState == D3DKMT_DEVICEEXECUTION_RESET)) {
-         fprintf(stderr, "radv/wddm2: watchdog: GPU %s (state=0x%x), killing process\n",
+         fprintf(stderr, "radv/wddm2: watchdog: GPU %s (state=0x%x), dumping device state\n",
                  get_state.ExecutionState == D3DKMT_DEVICEEXECUTION_HUNG ? "HUNG" : "RESET",
                  get_state.ExecutionState);
+
+         /* Query page-fault details too: an unrecoverable fault is frequently
+          * what leaves the engine stuck, and the faulted VA / pipeline stage
+          * tells us which allocation or engine the GPU died on. */
+         D3DKMT_GETDEVICESTATE pfst = {
+            .hDevice = ws->device_h,
+            .StateType = D3DKMT_DEVICESTATE_PAGE_FAULT,
+         };
+         status = WDDM2_DISPATCH(GetDeviceState(&pfst));
+         if (NT_SUCCESS(status))
+            fprintf(stderr,
+                    "radv/wddm2: watchdog: PAGE_FAULT va=0x%llx err=0x%x vend=%i flags=0x%x stage=%u\n",
+                    (unsigned long long)pfst.PageFaultState.FaultedVirtualAddress,
+                    pfst.PageFaultState.FaultErrorCode.GeneralErrorCode,
+                    pfst.PageFaultState.FaultErrorCode.DeviceSpecificCode,
+                    pfst.PageFaultState.PageFaultFlags,
+                    pfst.PageFaultState.FaultedPipelineStage);
+         else
+            fprintf(stderr, "radv/wddm2: watchdog: page-fault state query returned 0x%X (no fault info)\n",
+                    (unsigned)status);
+
          TerminateProcess(GetCurrentProcess(), 1);
       }
    }
@@ -767,6 +789,13 @@ radv_wddm2_fill_gpu_info(struct radv_wddm2_winsys *ws,
 
    info->compiler_info.has_image_bvh_intersect_ray = false;
 
+   /* WDDM2 has no kernel-side PRT workaround info (amdgpu_sw_info_address_prt_wa_control_bit
+    * is DRM-only). Our VA allocator never hands out addresses with bit 47 set, so use the
+    * top of the 48-bit VA space as the NULL-PRT control bit: the SMEM fixup then becomes a
+    * no-op for every address in use, which matches the Linux split without corrupting VAs. */
+   if (info->compiler_info.has_smem_with_null_prt_bug)
+      info->address_prt_wa_control_bit = 47;
+
    return STATUS_SUCCESS;
 }
 
@@ -1053,6 +1082,10 @@ radv_wddm2_winsys_create(const struct vk_dx_adapter_info *adapter_info,
    struct radv_wddm2_winsys *ws = NULL;
    NTSTATUS status;
 
+   fprintf(stderr, "[wddm2:winsys] create enter (luid %x:%x)\n",
+           (unsigned)adapter_info->adapter_luid.LowPart,
+           (unsigned)adapter_info->adapter_luid.HighPart);
+
    /* We have to keep this lock till insertion. */
    simple_mtx_lock(&winsys_creation_mutex);
    if (!winsyses)
@@ -1064,10 +1097,11 @@ radv_wddm2_winsys_create(const struct vk_dx_adapter_info *adapter_info,
    }
 
    struct hash_entry *entry = _mesa_hash_table_search(winsyses,
-                                                      (void *) winsys_luid_key(&adapter_info->adapter_luid));
+                                                       (void *) winsys_luid_key(&adapter_info->adapter_luid));
    if (entry) {
       ws = (struct radv_wddm2_winsys *)entry->data;
       ++ws->refcount;
+      fprintf(stderr, "[wddm2:winsys] create: found existing winsys, refcount=%u\n", ws->refcount);
    }
    
    if (ws) {
@@ -1076,6 +1110,7 @@ radv_wddm2_winsys_create(const struct vk_dx_adapter_info *adapter_info,
       return VK_SUCCESS;
    }
 
+   fprintf(stderr, "[wddm2:winsys] create: allocating new winsys\n");
    ws = calloc(1, sizeof(struct radv_wddm2_winsys));
    if (!ws) {
       result = VK_ERROR_OUT_OF_HOST_MEMORY;
@@ -1106,12 +1141,14 @@ radv_wddm2_winsys_create(const struct vk_dx_adapter_info *adapter_info,
    D3DKMT_OPENADAPTERFROMLUID open_adapter = {
       .AdapterLuid = ws->adapter_luid,
    };
+   fprintf(stderr, "[wddm2:winsys] create: OpenAdapterFromLuid...\n");
    status = WDDM2_DISPATCH(OpenAdapterFromLuid(&open_adapter));
    if (!NT_SUCCESS(status)) {
       fprintf(stderr, "Can't open adapter with luid %X%X\n", adapter_info->adapter_luid.LowPart, adapter_info->adapter_luid.HighPart);
       result = VK_ERROR_INITIALIZATION_FAILED;
       goto error_ptr_alloc;
    }
+   fprintf(stderr, "[wddm2:winsys] create: OpenAdapterFromLuid ok, hAdapter=%i\n", open_adapter.hAdapter);
 
    ws->adapter_h = open_adapter.hAdapter;
 
@@ -1120,24 +1157,28 @@ radv_wddm2_winsys_create(const struct vk_dx_adapter_info *adapter_info,
    D3DKMT_CREATEDEVICE create_device = {
       .hAdapter = ws->adapter_h,
    };
+   fprintf(stderr, "[wddm2:winsys] create: CreateDevice...\n");
    status = WDDM2_DISPATCH(CreateDevice(&create_device));
    if (!NT_SUCCESS(status)) {
       fprintf(stderr, "Couldn't create device for adapter %i\n", ws->adapter_h);
       result = VK_ERROR_INITIALIZATION_FAILED;
       goto error_open_adapter;
    }
+   fprintf(stderr, "[wddm2:winsys] create: CreateDevice ok, hDevice=%i\n", create_device.hDevice);
 
    ws->device_h = create_device.hDevice;
 
    D3DKMT_CREATEPAGINGQUEUE create_paging_queue = {
       .hDevice = ws->device_h,
    };
+   fprintf(stderr, "[wddm2:winsys] create: CreatePagingQueue...\n");
    status = WDDM2_DISPATCH(CreatePagingQueue(&create_paging_queue));
    if (!NT_SUCCESS(status)) {
       fprintf(stderr, "Couldn't create paging queue\n");
       result = VK_ERROR_INITIALIZATION_FAILED;
       goto error_create_device;
    }
+   fprintf(stderr, "[wddm2:winsys] create: CreatePagingQueue ok\n");
 
    ws->paging_queue_h = create_paging_queue.hPagingQueue;
    ws->paging_fence_h = create_paging_queue.hSyncObject;
