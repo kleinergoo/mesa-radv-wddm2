@@ -249,6 +249,10 @@ struct vk_device {
    void *wddm2_winsys;
    void (*wddm2_notify_fence_destroyed)(void *winsys, struct vk_device *device,
                                         uint32_t handle, uint64_t *value_map);
+   /* Dumps the winsys GPU-hang post-mortem (page-fault details, last IBs, GFX
+    * command-stream ring).  Called synchronously from the fence runtime when a
+    * device error is observed, before the error is reported to the app. */
+   void (*wddm2_dump_hang)(void *winsys, struct vk_device *device);
 
    /** Implicit pipeline cache, or NULL */
    struct vk_pipeline_cache *mem_cache;
@@ -385,6 +389,15 @@ vk_device_set_wddm2_winsys(struct vk_device *device, void *winsys,
 {
    device->wddm2_winsys = winsys;
    device->wddm2_notify_fence_destroyed = notify_fence_destroyed;
+}
+
+static inline void
+vk_device_set_wddm2_dump_hang(struct vk_device *device, void *winsys,
+                              void (*dump_hang)(void *winsys,
+                                                struct vk_device *device))
+{
+   device->wddm2_winsys = winsys;
+   device->wddm2_dump_hang = dump_hang;
 }
 
 /** Tears down a vk_device

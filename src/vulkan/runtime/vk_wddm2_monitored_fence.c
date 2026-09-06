@@ -447,6 +447,11 @@ vk_wddm2_check_device_status(struct vk_device *device)
                        "D3DKMTGetDeviceState failed");
    }
 
+   if (get_state.ExecutionState != D3DKMT_DEVICEEXECUTION_ACTIVE &&
+       get_state.ExecutionState != D3DKMT_DEVICEEXECUTION_STOPPED &&
+       device->wddm2_dump_hang)
+      device->wddm2_dump_hang(device->wddm2_winsys, device);
+
    switch (get_state.ExecutionState) {
    case D3DKMT_DEVICEEXECUTION_ACTIVE:
       return VK_SUCCESS;

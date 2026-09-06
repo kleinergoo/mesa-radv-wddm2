@@ -456,11 +456,19 @@ vk_device_get_proc_addr(const struct vk_device *device,
       return NULL;
 
    struct vk_instance *instance = device->physical->instance;
-   return vk_device_dispatch_table_get_if_supported(&device->dispatch_table,
-                                                    name,
-                                                    instance->app_info.api_version,
-                                                    &instance->enabled_extensions,
-                                                    &device->enabled_extensions);
+   PFN_vkVoidFunction fn =
+      vk_device_dispatch_table_get_if_supported(&device->dispatch_table,
+                                                name,
+                                                instance->app_info.api_version,
+                                                &instance->enabled_extensions,
+                                                &device->enabled_extensions);
+   if (!fn && getenv("RADV_DEBUG_MISSING_PROCS"))
+      fprintf(stderr, "radv: vkGetDeviceProcAddr(%s) -> NULL (app_api=%u.%u.%u)\n",
+              name,
+              VK_API_VERSION_MAJOR(instance->app_info.api_version),
+              VK_API_VERSION_MINOR(instance->app_info.api_version),
+              VK_API_VERSION_PATCH(instance->app_info.api_version));
+   return fn;
 }
 
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL

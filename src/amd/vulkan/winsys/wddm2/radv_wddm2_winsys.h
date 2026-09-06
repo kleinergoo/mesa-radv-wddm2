@@ -74,6 +74,7 @@ struct radv_wddm2_hang_slot {
 struct vk_device;
 void radv_wddm2_notify_fence_destroyed(void *winsys, struct vk_device *device,
                                        uint32_t handle, uint64_t *value_map);
+void radv_wddm2_winsys_dump_hang(void *winsys, struct vk_device *device);
 
 /* A BO whose real destroy (VA free / allocation destroy) has been deferred so a
  * still-in-flight submit that references its VA via an INDIRECT_BUFFER chain can
@@ -108,6 +109,7 @@ struct radv_wddm2_winsys {
     * IB per engine, then kills the process so DWM doesn't freeze. */
    HANDLE watchdog_thread;
    bool watchdog_stop;
+   uint32_t hang_dump_done;
 
    /* Last-submitted IB summary per IP, published under deferred_mtx in the
     * submit critical section. Read by the watchdog on HUNG/RESET to identify

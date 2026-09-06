@@ -37,6 +37,7 @@
 
 #include "radv_wddm2_winsys_public.h"
 #include "util/macros.h"
+#include "util/u_atomic.h"
 #include "util/u_memory.h"
 #include "util/u_string.h"
 #include "ac_surface.h"
@@ -84,17 +85,102 @@ winsys_luid_key(const LUID *luid)
    return ((uintptr_t)(uint32_t)luid->HighPart << 32) | (uint32_t)luid->LowPart;
 }
 
-/* GPU-alive watchdog: polls GetDeviceState every 50ms. On any non-ACTIVE
- * execution state (HUNG / RESET / page fault / DMA fault / out-of-memory /
- * stopped) it first tries to grab the KMD page-fault details (faulted VA,
- * pipeline stage) while they are still available - the device is removed
- * quickly after a fault - then kills the process so DWM doesn't freeze. */
+/* Dump the reason the engine stopped (page fault details, last IB per engine
+ * and the captured main GFX command-stream ring).  Also called synchronously
+ * from the generic WDDM2 fence runtime when it observes a device error in the
+ * application thread, so the ring survives the app exiting right after it
+ * receives VK_ERROR_DEVICE_LOST. */
+static void
+radv_wddm2_winsys_dump_state(struct radv_wddm2_winsys *ws, unsigned exec_state)
+{
+   /* Watchdog and the fence runtime can observe the same hang; only the first
+    * one dumps so the ring is not interleaved/corrupted on a shared FILE*. */
+   if (p_atomic_cmpxchg(&ws->hang_dump_done, 0, 1) != 0)
+      return;
+
+   fprintf(stderr, "radv/wddm2: watchdog: GPU state=0x%x, dumping device state\n", exec_state);
+
+   /* Query page-fault details too: an unrecoverable fault is frequently
+    * what leaves the engine stuck, and the faulted VA / pipeline stage
+    * tells us which allocation or engine the GPU died on.  The device is
+    * removed shortly after a fault, so grab this before it disappears. */
+   D3DKMT_GETDEVICESTATE pfst = {
+      .hDevice = ws->device_h,
+      .StateType = D3DKMT_DEVICESTATE_PAGE_FAULT,
+   };
+   NTSTATUS status = WDDM2_DISPATCH(GetDeviceState(&pfst));
+   if (NT_SUCCESS(status))
+      fprintf(stderr,
+              "radv/wddm2: watchdog: PAGE_FAULT va=0x%llx err=0x%x vend=%i flags=0x%x stage=%u\n",
+              (unsigned long long)pfst.PageFaultState.FaultedVirtualAddress,
+              pfst.PageFaultState.FaultErrorCode.GeneralErrorCode,
+              pfst.PageFaultState.FaultErrorCode.DeviceSpecificCode,
+              pfst.PageFaultState.PageFaultFlags,
+              pfst.PageFaultState.FaultedPipelineStage);
+   else
+      fprintf(stderr, "radv/wddm2: watchdog: page-fault state query returned 0x%X (no fault info)\n",
+              (unsigned)status);
+
+   /* Report the last IB handed to each engine so the offending command
+    * stream can be identified. */
+   for (unsigned ip = 0; ip < AMD_NUM_IP_TYPES; ip++) {
+      if (ws->last_ib_summary[ip].va)
+         fprintf(stderr,
+                 "radv/wddm2: watchdog: last IB ip=%u va=0x%llx len=%u fence_value=%llu\n",
+                 ip, (unsigned long long)ws->last_ib_summary[ip].va,
+                 ws->last_ib_summary[ip].len,
+                 (unsigned long long)ws->last_ib_summary[ip].fence_value);
+   }
+
+   /* Dump the captured main GFX command streams, oldest first. */
+   {
+      /* simple selection sort by stamp */
+      int order[RADV_WDDM2_HANG_RING];
+      int norder = 0;
+      for (int i = 0; i < RADV_WDDM2_HANG_RING; i++)
+         if (ws->hang_ring[i].ndw)
+            order[norder++] = i;
+      for (int i = 0; i < norder; i++)
+         for (int j = i + 1; j < norder; j++)
+            if (ws->hang_ring[order[j]].stamp < ws->hang_ring[order[i]].stamp) {
+               int t = order[i]; order[i] = order[j]; order[j] = t;
+            }
+      for (int i = 0; i < norder; i++) {
+         int s = order[i];
+         fprintf(stderr, "radv/wddm2: watchdog: GFX CS #%llu (%u dwords%s):\n",
+                 (unsigned long long)ws->hang_ring[s].stamp,
+                 ws->hang_ring[s].ndw,
+                 ws->hang_ring[s].truncated ? ", truncated" : "");
+         for (unsigned k = 0; k < ws->hang_ring[s].ndw; k++) {
+            if (k % 8 == 0)
+               fprintf(stderr, "radv/wddm2:   %04x:", k);
+            fprintf(stderr, " %08x", ws->hang_ring[s].dw[k]);
+            if (k % 8 == 7)
+               fprintf(stderr, "\n");
+         }
+         if (ws->hang_ring[s].ndw % 8)
+            fprintf(stderr, "\n");
+      }
+   }
+}
+
+void
+radv_wddm2_winsys_dump_hang(void *winsys, struct vk_device *device)
+{
+   struct radv_wddm2_winsys *ws = winsys;
+   radv_wddm2_winsys_dump_state(ws, D3DKMT_DEVICEEXECUTION_HUNG);
+}
+
+/* GPU-alive watchdog: polls GetDeviceState every ms. On any non-ACTIVE
+ * execution state it dumps the page-fault / last-IB / command-stream ring via
+ * radv_wddm2_winsys_dump_state(), then kills the process so DWM doesn't
+ * freeze. */
 static DWORD WINAPI
 radv_wddm2_watchdog_thread(LPVOID param)
 {
    struct radv_wddm2_winsys *ws = param;
    while (!ws->watchdog_stop) {
-      Sleep(50);
+      Sleep(1);
       D3DKMT_GETDEVICESTATE get_state = {
          .hDevice = ws->device_h,
          .StateType = D3DKMT_DEVICESTATE_EXECUTION,
@@ -103,72 +189,7 @@ radv_wddm2_watchdog_thread(LPVOID param)
       if (NT_SUCCESS(status) &&
           get_state.ExecutionState != D3DKMT_DEVICEEXECUTION_ACTIVE &&
           get_state.ExecutionState != D3DKMT_DEVICEEXECUTION_STOPPED) {
-         fprintf(stderr, "radv/wddm2: watchdog: GPU state=0x%x, dumping device state\n",
-                 get_state.ExecutionState);
-
-         /* Query page-fault details too: an unrecoverable fault is frequently
-          * what leaves the engine stuck, and the faulted VA / pipeline stage
-          * tells us which allocation or engine the GPU died on.  The device is
-          * removed shortly after a fault, so grab this before it disappears. */
-         D3DKMT_GETDEVICESTATE pfst = {
-            .hDevice = ws->device_h,
-            .StateType = D3DKMT_DEVICESTATE_PAGE_FAULT,
-         };
-         status = WDDM2_DISPATCH(GetDeviceState(&pfst));
-         if (NT_SUCCESS(status))
-            fprintf(stderr,
-                    "radv/wddm2: watchdog: PAGE_FAULT va=0x%llx err=0x%x vend=%i flags=0x%x stage=%u\n",
-                    (unsigned long long)pfst.PageFaultState.FaultedVirtualAddress,
-                    pfst.PageFaultState.FaultErrorCode.GeneralErrorCode,
-                    pfst.PageFaultState.FaultErrorCode.DeviceSpecificCode,
-                    pfst.PageFaultState.PageFaultFlags,
-                    pfst.PageFaultState.FaultedPipelineStage);
-         else
-            fprintf(stderr, "radv/wddm2: watchdog: page-fault state query returned 0x%X (no fault info)\n",
-                    (unsigned)status);
-
-         /* Report the last IB handed to each engine so the offending command
-          * stream can be identified. */
-         for (unsigned ip = 0; ip < AMD_NUM_IP_TYPES; ip++) {
-            if (ws->last_ib_summary[ip].va)
-               fprintf(stderr,
-                       "radv/wddm2: watchdog: last IB ip=%u va=0x%llx len=%u fence_value=%llu\n",
-                       ip, (unsigned long long)ws->last_ib_summary[ip].va,
-                       ws->last_ib_summary[ip].len,
-                       (unsigned long long)ws->last_ib_summary[ip].fence_value);
-         }
-
-         /* Dump the captured main GFX command streams, oldest first. */
-         {
-            /* simple selection sort by stamp */
-            int order[RADV_WDDM2_HANG_RING];
-            int norder = 0;
-            for (int i = 0; i < RADV_WDDM2_HANG_RING; i++)
-               if (ws->hang_ring[i].ndw)
-                  order[norder++] = i;
-            for (int i = 0; i < norder; i++)
-               for (int j = i + 1; j < norder; j++)
-                  if (ws->hang_ring[order[j]].stamp < ws->hang_ring[order[i]].stamp) {
-                     int t = order[i]; order[i] = order[j]; order[j] = t;
-                  }
-            for (int i = 0; i < norder; i++) {
-               int s = order[i];
-               fprintf(stderr, "radv/wddm2: watchdog: GFX CS #%llu (%u dwords%s):\n",
-                       (unsigned long long)ws->hang_ring[s].stamp,
-                       ws->hang_ring[s].ndw,
-                       ws->hang_ring[s].truncated ? ", truncated" : "");
-               for (unsigned k = 0; k < ws->hang_ring[s].ndw; k++) {
-                  if (k % 8 == 0)
-                     fprintf(stderr, "radv/wddm2:   %04x:", k);
-                  fprintf(stderr, " %08x", ws->hang_ring[s].dw[k]);
-                  if (k % 8 == 7)
-                     fprintf(stderr, "\n");
-               }
-               if (ws->hang_ring[s].ndw % 8)
-                  fprintf(stderr, "\n");
-            }
-         }
-
+         radv_wddm2_winsys_dump_state(ws, get_state.ExecutionState);
          TerminateProcess(GetCurrentProcess(), 1);
       }
    }
@@ -946,8 +967,10 @@ radv_wddm2_winsys_destroy(struct radeon_winsys *_ws)
 
    /* Stop GPU-alive watchdog thread before destroying device */
    ws->watchdog_stop = true;
-   WaitForSingleObject(ws->watchdog_thread, 1000);
-   CloseHandle(ws->watchdog_thread);
+   if (ws->watchdog_thread) {
+      WaitForSingleObject(ws->watchdog_thread, 1000);
+      CloseHandle(ws->watchdog_thread);
+   }
 
    radv_wddm2_bo_destroy_deferred_all(ws);
 
@@ -1247,9 +1270,15 @@ radv_wddm2_winsys_create(const struct vk_dx_adapter_info *adapter_info,
    ws->sync_types[1] = &ws->sync_binary_type.sync;
    ws->sync_types[2] = NULL;
 
-   /* Start GPU-alive watchdog thread */
+   /* Start GPU-alive watchdog thread (skip when RADV_WDDM2_NO_WATCHDOG is set;
+    * used to expose the primary fault when the watchdog's teardown race masks
+    * it with a secondary crash). */
    ws->watchdog_stop = false;
-   ws->watchdog_thread = CreateThread(NULL, 0, radv_wddm2_watchdog_thread, ws, 0, NULL);
+   ws->hang_dump_done = 0;
+   if (!getenv("RADV_WDDM2_NO_WATCHDOG"))
+      ws->watchdog_thread = CreateThread(NULL, 0, radv_wddm2_watchdog_thread, ws, 0, NULL);
+   else
+      ws->watchdog_thread = NULL;
 
    _mesa_hash_table_insert(winsyses, (void *) winsys_luid_key(&ws->adapter_luid), ws);
    simple_mtx_unlock(&winsys_creation_mutex);

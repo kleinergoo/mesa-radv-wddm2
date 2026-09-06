@@ -44,6 +44,7 @@ struct radeon_winsys_info {
 
 void radv_wddm2_notify_fence_destroyed(void *winsys, struct vk_device *device,
                                        uint32_t handle, uint64_t *value_map);
+void radv_wddm2_winsys_dump_hang(void *winsys, struct vk_device *device);
 
 VkResult radv_wddm2_winsys_query_info(const struct vk_dx_adapter_info *adapter_info,
                                       uint64_t debug_flags, struct radeon_winsys_info *info);
