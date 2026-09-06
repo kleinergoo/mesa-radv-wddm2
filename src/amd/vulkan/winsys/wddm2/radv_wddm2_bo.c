@@ -360,20 +360,28 @@ static uint64_t
 radv_wddm2_reserve_va_range(struct radv_wddm2_winsys *ws, uint64_t size, unsigned alignment,
                             enum radeon_bo_flag flags)
 {
-   D3DGPU_VIRTUAL_ADDRESS min;
+   D3DGPU_VIRTUAL_ADDRESS min, max;
    NTSTATUS status;
-   
-   if (flags & RADEON_FLAG_32BIT)
+
+   /* Keep the 32-bit and replayable heaps in their dedicated windows; give
+    * everything else the full [HEAP_START, REPLAY_HEAP_START) range so a
+    * sparse/virtual allocation stream cannot exhaust a narrow 4 GB window
+    * (DOOM: The Dark Ages streaming reserves several GB of virtual VA). */
+   if (flags & RADEON_FLAG_32BIT) {
       min = RADV_WDDM2_32BIT_HEAP_START;
-   else if (flags & RADEON_FLAG_REPLAYABLE)
+      max = RADV_WDDM2_HEAP_START;
+   } else if (flags & RADEON_FLAG_REPLAYABLE) {
       min = RADV_WDDM2_REPLAY_HEAP_START;
-   else
+      max = RADV_WDDM2_REPLAY_HEAP_START + (4ull << 32);
+   } else {
       min = RADV_WDDM2_HEAP_START;
+      max = RADV_WDDM2_REPLAY_HEAP_START;
+   }
 
    D3DDDI_RESERVEGPUVIRTUALADDRESS reserve = {
       .hPagingQueue = ws->paging_queue_h,
       .MinimumAddress = min,
-      .MaximumAddress = min + (1ull << 32),
+      .MaximumAddress = max,
       .Size = size,
    };
    status = WDDM2_DISPATCH(ReserveGpuVirtualAddress(&reserve));
@@ -699,10 +707,30 @@ radv_wddm2_bo_create(struct radeon_winsys *_ws, uint64_t size, unsigned alignmen
                      unsigned priority, uint64_t address,
                      struct radeon_winsys_bo **out_bo)
 {
+   VkResult result;
    if (flags & RADEON_FLAG_VIRTUAL)
-      return radv_wddm2_virtual_bo_create(_ws, size, alignment, initial_domain, flags,
-                                          priority, address, out_bo);
-   return radv_wddm2_bo_create_internal(_ws, size, alignment, initial_domain, flags, priority, address, NULL, out_bo);
+      result = radv_wddm2_virtual_bo_create(_ws, size, alignment, initial_domain, flags,
+                                            priority, address, out_bo);
+   else
+      result = radv_wddm2_bo_create_internal(_ws, size, alignment, initial_domain, flags,
+                                             priority, address, NULL, out_bo);
+
+   if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY) {
+      struct radv_wddm2_winsys *ws = radv_wddm2_winsys(_ws);
+      static LONG oom_diag_once = 0;
+      if (InterlockedCompareExchange(&oom_diag_once, 1, 0) == 0) {
+         fprintf(stderr,
+                 "RADV_WDDM2_OOM size=0x%" PRIx64 " align=0x%x dom=0x%x flags=0x%x prio=%u addr=0x%" PRIx64 "\n",
+                 size, alignment, (unsigned)initial_domain, (unsigned)flags, priority, address);
+         simple_mtx_lock(&ws->alloc_mtx);
+         fprintf(stderr, "RADV_WDDM2_OOM alloc vram=0x%llx vram_vis=0x%llx gtt=0x%llx\n",
+                 (unsigned long long)ws->alloc_vram,
+                 (unsigned long long)ws->alloc_vram_vis,
+                 (unsigned long long)ws->alloc_gtt);
+         simple_mtx_unlock(&ws->alloc_mtx);
+      }
+   }
+   return result;
 }
 
 static VkResult

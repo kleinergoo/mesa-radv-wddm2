@@ -3398,10 +3398,46 @@ struct radeon_winsys_heap_info {
 };
 #endif
 
+/* From winsys/wddm2/radv_wddm2_winsys_public.h (not on this include path). */
+VkResult radv_wddm2_winsys_create(const struct vk_dx_adapter_info *adapter_info,
+                                  const struct radeon_info *info, uint64_t debug_flags,
+                                  uint64_t perftest_flags, struct radeon_winsys **winsys);
+
 static void
 radv_query_heap_info(struct radv_physical_device *pdev, struct radeon_winsys_heap_info *heap_info)
 {
    memset(heap_info, 0, sizeof(*heap_info));
+
+   if (!pdev->heap_ws) {
+      const struct radv_instance *instance = radv_physical_device_instance(pdev);
+      LUID adapter_luid;
+      memcpy(&adapter_luid, pdev->info.luid, sizeof(adapter_luid));
+
+      struct vk_dx_adapter_info adapter_info = {
+         .adapter_luid = adapter_luid,
+         .vendor_id = ATI_VENDOR_ID,
+         .physical_adapter_index = 0,
+      };
+
+      struct radeon_winsys *ws = NULL;
+      VkResult r = radv_wddm2_winsys_create(&adapter_info, &pdev->info,
+                                            instance->debug_flags, instance->perftest_flags,
+                                            &ws);
+      if (r != VK_SUCCESS || !ws)
+         return;
+      pdev->heap_ws = ws;
+   }
+
+   struct radeon_winsys *ws = pdev->heap_ws;
+
+   heap_info->allocated_vram = ws->query_value(ws, RADEON_ALLOCATED_VRAM);
+   heap_info->allocated_vram_vis = ws->query_value(ws, RADEON_ALLOCATED_VRAM_VIS);
+   heap_info->allocated_gtt = ws->query_value(ws, RADEON_ALLOCATED_GTT);
+
+   /* System-wide usage (this adapter, across all processes). */
+   heap_info->vram_usage = ws->query_value(ws, RADEON_VRAM_USAGE);
+   heap_info->vram_vis_usage = ws->query_value(ws, RADEON_VRAM_VIS_USAGE);
+   heap_info->gtt_usage = ws->query_value(ws, RADEON_GTT_USAGE);
 }
 #else
 static void

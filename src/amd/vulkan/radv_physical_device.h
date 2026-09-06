@@ -75,10 +75,14 @@ enum radv_drm_device_type {
    RADV_DRM_DEVICE_VIRTIO,
 };
 
-struct radv_physical_device {
+   struct radv_physical_device {
    struct vk_physical_device vk;
 
    struct radeon_info info;
+   /* _WIN32: cached winsys used to answer vkGetPhysicalDeviceMemoryBudget*.
+    * Opened lazily; lives for the instance lifetime (process-scoped, matches
+    * the shared winsys cache). */
+   struct radeon_winsys *heap_ws;
    char name[VK_MAX_PHYSICAL_DEVICE_NAME_SIZE];
    char marketing_name[VK_MAX_PHYSICAL_DEVICE_NAME_SIZE];
    uint8_t driver_uuid[VK_UUID_SIZE];
