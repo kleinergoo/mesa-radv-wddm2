@@ -54,10 +54,6 @@ vk_physical_device_init(struct vk_physical_device *pdevice,
    vk_physical_device_dispatch_table_from_entrypoints(
       &pdevice->dispatch_table, &vk_common_physical_device_entrypoints, false);
 
-   fprintf(stderr, "[RADV] dispatch_table.GetPhysicalDeviceProperties2 = %p\n", (void*)pdevice->dispatch_table.GetPhysicalDeviceProperties2); fflush(stderr);
-   fprintf(stderr, "[RADV] dispatch_table.GetPhysicalDeviceQueueFamilyProperties2 = %p\n", (void*)pdevice->dispatch_table.GetPhysicalDeviceQueueFamilyProperties2); fflush(stderr);
-   fprintf(stderr, "[RADV] dispatch_table.GetPhysicalDeviceMemoryProperties2 = %p\n", (void*)pdevice->dispatch_table.GetPhysicalDeviceMemoryProperties2); fflush(stderr);
-
    /* TODO */
    pdevice->disk_cache = NULL;
 
@@ -91,7 +87,6 @@ vk_common_EnumerateDeviceExtensionProperties(VkPhysicalDevice physicalDevice,
                                              VkExtensionProperties *pProperties)
 {
    VK_FROM_HANDLE(vk_physical_device, pdevice, physicalDevice);
-   fprintf(stderr, "[RADV] vk_common_EnumerateDeviceExtensionProperties pCount=%p pProps=%p\n", (void*)pPropertyCount, (void*)pProperties); fflush(stderr);
    VK_OUTARRAY_MAKE_TYPED(VkExtensionProperties, out, pProperties, pPropertyCount);
 
    for (int i = 0; i < VK_DEVICE_EXTENSION_COUNT; i++) {
@@ -116,7 +111,6 @@ vk_common_GetPhysicalDeviceFeatures(VkPhysicalDevice physicalDevice,
                                     VkPhysicalDeviceFeatures *pFeatures)
 {
    VK_FROM_HANDLE(vk_physical_device, pdevice, physicalDevice);
-   fprintf(stderr, "[RADV] vk_common_GetPhysicalDeviceFeatures\n"); fflush(stderr);
 
    /* Don't zero-init this struct since the driver fills it out entirely */
    VkPhysicalDeviceFeatures2 features2;
@@ -133,20 +127,15 @@ vk_common_GetPhysicalDeviceProperties(VkPhysicalDevice physicalDevice,
                                       VkPhysicalDeviceProperties *pProperties)
 {
    VK_FROM_HANDLE(vk_physical_device, pdevice, physicalDevice);
-   fprintf(stderr, "[RADV] vk_common_GetPhysicalDeviceProperties\n"); fflush(stderr);
 
    /* Don't zero-init this struct since the driver fills it out entirely */
    VkPhysicalDeviceProperties2 props2;
    props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
    props2.pNext = NULL;
 
-   fprintf(stderr, "[RADV] vk_common_GetPhysicalDeviceProperties: calling dispatch Properties2 at %p (pdevice=%p)\n",
-           (void*)pdevice->dispatch_table.GetPhysicalDeviceProperties2, (void*)pdevice); fflush(stderr);
    pdevice->dispatch_table.GetPhysicalDeviceProperties2(physicalDevice,
                                                         &props2);
-   fprintf(stderr, "[RADV] vk_common_GetPhysicalDeviceProperties: dispatch Properties2 returned\n"); fflush(stderr);
    *pProperties = props2.properties;
-   fprintf(stderr, "[RADV] vk_common_GetPhysicalDeviceProperties: done, apiVersion=%u\n", (unsigned)props2.properties.apiVersion); fflush(stderr);
 }
 
 VKAPI_ATTR void VKAPI_CALL

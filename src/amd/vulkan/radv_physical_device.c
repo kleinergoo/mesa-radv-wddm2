@@ -3311,13 +3311,11 @@ radv_get_global_queue_priorities(struct radv_physical_device *pdev, VkQueueFamil
 
 VKAPI_ATTR void VKAPI_CALL
 radv_GetPhysicalDeviceQueueFamilyProperties2(VkPhysicalDevice physicalDevice, uint32_t *pCount,
-                                              VkQueueFamilyProperties2 *pQueueFamilyProperties)
+                                             VkQueueFamilyProperties2 *pQueueFamilyProperties)
 {
    VK_FROM_HANDLE(radv_physical_device, pdev, physicalDevice);
-   fprintf(stderr, "[RADV] GetPhysicalDeviceQueueFamilyProperties2: pCount=%p pProps=%p\n", (void*)pCount, (void*)pQueueFamilyProperties); fflush(stderr);
    if (!pQueueFamilyProperties) {
       radv_get_physical_device_queue_family_properties(pdev, pCount, NULL);
-      fprintf(stderr, "[RADV]   -> count=%u\n", *pCount); fflush(stderr);
       return;
    }
    VkQueueFamilyProperties *properties[] = {
@@ -3648,7 +3646,6 @@ radv_GetPhysicalDeviceMemoryProperties2(VkPhysicalDevice physicalDevice,
                                         VkPhysicalDeviceMemoryProperties2 *pMemoryProperties)
 {
    VK_FROM_HANDLE(radv_physical_device, pdev, physicalDevice);
-   fprintf(stderr, "[RADV] GetPhysicalDeviceMemoryProperties2: pMemProps=%p\n", (void*)pMemoryProperties); fflush(stderr);
 
    pMemoryProperties->memoryProperties = pdev->memory_properties;
 
