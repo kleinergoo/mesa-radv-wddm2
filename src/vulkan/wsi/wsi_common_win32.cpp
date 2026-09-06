@@ -1217,10 +1217,38 @@ wsi_win32_surface_create_swapchain_dxgi(
       desc.BufferUsage |= DXGI_USAGE_RENDER_TARGET_OUTPUT;
 
    IDXGISwapChain1 *swapchain1;
-   if (FAILED(factory->CreateSwapChainForComposition(queue, &desc, NULL, &swapchain1)) ||
-       FAILED(swapchain1->QueryInterface(&chain->dxgi)))
-      return VK_ERROR_INITIALIZATION_FAILED;
+   HRESULT hr_create = factory->CreateSwapChainForComposition(queue, &desc, NULL, &swapchain1);
+   if (FAILED(hr_create)) {
+      /* Some AMD DXGI stacks reject sRGB flip-model composition swapchains with
+       * DXGI_ERROR_INVALID_CALL.  The sRGB encode already happened when the app
+       * rendered into the swapchain image, and this path only copies those bytes
+       * to the display buffer, so the non-sRGB variant is equivalent here. */
+      DXGI_FORMAT linear = swapchain_format;
+      if (swapchain_format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB)
+         linear = DXGI_FORMAT_B8G8R8A8_UNORM;
+      else if (swapchain_format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB)
+         linear = DXGI_FORMAT_R8G8B8A8_UNORM;
 
+      if (linear != swapchain_format) {
+         desc.Format = linear;
+         hr_create = factory->CreateSwapChainForComposition(queue, &desc, NULL, &swapchain1);
+         if (getenv("RADV_WSI_DEBUG") && SUCCEEDED(hr_create))
+            fprintf(stderr, "W32SC fell back to linear swapchain format\n");
+      }
+
+      if (FAILED(hr_create)) {
+         if (getenv("RADV_WSI_DEBUG"))
+            fprintf(stderr, "W32SC CreateSwapChainForComposition failed hr=0x%08lx fmt=%u eff=%u flags=0x%x\n",
+                    (unsigned long)hr_create, (unsigned)desc.Format,
+                    (unsigned)desc.SwapEffect, (unsigned)desc.Flags);
+         return VK_ERROR_INITIALIZATION_FAILED;
+      }
+   }
+
+   if (FAILED(swapchain1->QueryInterface(&chain->dxgi))) {
+      swapchain1->Release();
+      return VK_ERROR_INITIALIZATION_FAILED;
+   }
    swapchain1->Release();
 
    if (!surface->target &&
