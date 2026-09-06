@@ -84,30 +84,32 @@ winsys_luid_key(const LUID *luid)
    return ((uintptr_t)(uint32_t)luid->HighPart << 32) | (uint32_t)luid->LowPart;
 }
 
-/* GPU-alive watchdog: polls GetDeviceState every 200ms. If the engine is
- * HUNG or RESET, dumps whatever execution/page-fault state the KMD reports
- * (faulted VA, pipeline stage) and kills the process so DWM doesn't freeze. */
+/* GPU-alive watchdog: polls GetDeviceState every 50ms. On any non-ACTIVE
+ * execution state (HUNG / RESET / page fault / DMA fault / out-of-memory /
+ * stopped) it first tries to grab the KMD page-fault details (faulted VA,
+ * pipeline stage) while they are still available - the device is removed
+ * quickly after a fault - then kills the process so DWM doesn't freeze. */
 static DWORD WINAPI
 radv_wddm2_watchdog_thread(LPVOID param)
 {
    struct radv_wddm2_winsys *ws = param;
    while (!ws->watchdog_stop) {
-      Sleep(200);
+      Sleep(50);
       D3DKMT_GETDEVICESTATE get_state = {
          .hDevice = ws->device_h,
          .StateType = D3DKMT_DEVICESTATE_EXECUTION,
       };
       NTSTATUS status = WDDM2_DISPATCH(GetDeviceState(&get_state));
       if (NT_SUCCESS(status) &&
-          (get_state.ExecutionState == D3DKMT_DEVICEEXECUTION_HUNG ||
-           get_state.ExecutionState == D3DKMT_DEVICEEXECUTION_RESET)) {
-         fprintf(stderr, "radv/wddm2: watchdog: GPU %s (state=0x%x), dumping device state\n",
-                 get_state.ExecutionState == D3DKMT_DEVICEEXECUTION_HUNG ? "HUNG" : "RESET",
+          get_state.ExecutionState != D3DKMT_DEVICEEXECUTION_ACTIVE &&
+          get_state.ExecutionState != D3DKMT_DEVICEEXECUTION_STOPPED) {
+         fprintf(stderr, "radv/wddm2: watchdog: GPU state=0x%x, dumping device state\n",
                  get_state.ExecutionState);
 
          /* Query page-fault details too: an unrecoverable fault is frequently
           * what leaves the engine stuck, and the faulted VA / pipeline stage
-          * tells us which allocation or engine the GPU died on. */
+          * tells us which allocation or engine the GPU died on.  The device is
+          * removed shortly after a fault, so grab this before it disappears. */
          D3DKMT_GETDEVICESTATE pfst = {
             .hDevice = ws->device_h,
             .StateType = D3DKMT_DEVICESTATE_PAGE_FAULT,
@@ -124,6 +126,32 @@ radv_wddm2_watchdog_thread(LPVOID param)
          else
             fprintf(stderr, "radv/wddm2: watchdog: page-fault state query returned 0x%X (no fault info)\n",
                     (unsigned)status);
+
+         /* Report the last IB handed to each engine so the offending command
+          * stream can be identified. */
+         for (unsigned ip = 0; ip < AMD_NUM_IP_TYPES; ip++) {
+            if (ws->last_ib_summary[ip].va)
+               fprintf(stderr,
+                       "radv/wddm2: watchdog: last IB ip=%u va=0x%llx len=%u fence_value=%llu\n",
+                       ip, (unsigned long long)ws->last_ib_summary[ip].va,
+                       ws->last_ib_summary[ip].len,
+                       (unsigned long long)ws->last_ib_summary[ip].fence_value);
+         }
+
+         /* Dump the captured last main GFX command stream verbatim. */
+         if (ws->hang_capture_valid) {
+            fprintf(stderr, "radv/wddm2: watchdog: last GFX CS (%u dwords):\n",
+                    ws->hang_capture_dw);
+            for (unsigned i = 0; i < ws->hang_capture_dw; i++) {
+               if (i % 8 == 0)
+                  fprintf(stderr, "radv/wddm2:   %04x:", i);
+               fprintf(stderr, " %08x", ws->hang_capture[i]);
+               if (i % 8 == 7)
+                  fprintf(stderr, "\n");
+            }
+            if (ws->hang_capture_dw % 8)
+               fprintf(stderr, "\n");
+         }
 
          TerminateProcess(GetCurrentProcess(), 1);
       }
@@ -1126,8 +1154,9 @@ radv_wddm2_winsys_create(const struct vk_dx_adapter_info *adapter_info,
    ws->dbg = !!getenv("RADV_WDDM2_DBG");
    radv_winsys_bo_list_init(&ws->global_bo_list);
    radv_winsys_bo_log_init(&ws->bo_log, debug_flags);
-   simple_mtx_init(&ws->deferred_mtx, mtx_plain);
-   list_inithead(&ws->deferred_list);
+    simple_mtx_init(&ws->deferred_mtx, mtx_plain);
+    list_inithead(&ws->deferred_list);
+    simple_mtx_init(&ws->gpu_mtx, mtx_plain);
    simple_mtx_init(&ws->d3d_mtx, mtx_plain);
    simple_mtx_init(&ws->alloc_mtx, mtx_plain);
    ws->alloc_vram = 0;

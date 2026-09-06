@@ -629,6 +629,28 @@ radv_wddm2_submit_add_cs(struct radv_wddm2_ctx *ctx, struct submit_pdd_writer *p
    else if (type == RADV_CS_DUMP_TYPE_POSTAMBLE_IBS)
       flags = 0x104;
 
+   /* Keep a verbatim copy of the last main GFX command stream so a GPU hang
+    * can be decoded post-mortem (see watchdog). */
+   if (type == RADV_CS_DUMP_TYPE_MAIN_IBS && cs->hw_ip == AMD_IP_GFX) {
+      struct radv_wddm2_winsys *ws = ctx->ws;
+      unsigned cap_dw = ARRAY_SIZE(ws->hang_capture);
+      unsigned total = 0;
+      ws->hang_capture_valid = false;
+      for (unsigned i = 0; i < cs->num_ib_buffers && total < cap_dw; i++) {
+         struct radv_winsys_ib *ib = &cs->ib_buffers[i];
+         struct radeon_winsys_bo *bo = ib->bo;
+         void *map = radv_buffer_map(cs->ws, bo);
+         if (!map)
+            break;
+         const uint32_t *src = (const uint32_t *)((const char *)map + (ib->va - bo->va));
+         unsigned ndw = MIN2(ib->cdw, cap_dw - total);
+         memcpy(&ws->hang_capture[total], src, ndw * sizeof(uint32_t));
+         total += ndw;
+      }
+      ws->hang_capture_dw = total;
+      ws->hang_capture_valid = total > 0;
+   }
+
 for (unsigned i = 0; i < num_ib_buffers; i++) {
        struct radv_winsys_ib ib = cs->ib_buffers[i];
 
@@ -692,6 +714,9 @@ radv_wddm2_cs_submit_add_ibs(struct radv_wddm2_ctx *ctx, struct submit_pdd_write
       if (cs->hw_ip != hw_ip)
          continue;
 
+      if (ctx->ws->dump_ibs)
+         ctx->ws->base.cs_dump(&cs->base, stderr, NULL, 0, RADV_CS_DUMP_TYPE_PREAMBLE_IBS);
+
       radv_wddm2_submit_add_cs(ctx, pdd, cs, RADV_CS_DUMP_TYPE_PREAMBLE_IBS,
                                submit->is_gang, first_ib);
    }
@@ -701,6 +726,9 @@ radv_wddm2_cs_submit_add_ibs(struct radv_wddm2_ctx *ctx, struct submit_pdd_write
 
       if (cs->hw_ip != hw_ip)
          continue;
+
+      if (ctx->ws->dump_ibs)
+         ctx->ws->base.cs_dump(&cs->base, stderr, NULL, 0, RADV_CS_DUMP_TYPE_MAIN_IBS);
 
       radv_wddm2_submit_add_cs(ctx, pdd, cs, RADV_CS_DUMP_TYPE_MAIN_IBS,
                                submit->is_gang, first_ib);
@@ -712,6 +740,9 @@ radv_wddm2_cs_submit_add_ibs(struct radv_wddm2_ctx *ctx, struct submit_pdd_write
 
       if (cs->hw_ip != hw_ip)
          continue;
+
+      if (ctx->ws->dump_ibs)
+         ctx->ws->base.cs_dump(&cs->base, stderr, NULL, 0, RADV_CS_DUMP_TYPE_POSTAMBLE_IBS);
 
       radv_wddm2_submit_add_cs(ctx, pdd, cs, RADV_CS_DUMP_TYPE_POSTAMBLE_IBS,
                                submit->is_gang, first_ib);
@@ -734,10 +765,34 @@ radv_wddm2_submit_add_queue(struct radv_wddm2_ctx *ctx, struct submit_pdd_writer
 }
 
 static VkResult
+radv_wddm2_cs_submit_locked(struct radeon_winsys_ctx *_ctx,
+                            const struct radv_winsys_submit_info *submit,
+                            uint32_t wait_count, const struct vk_sync_wait *waits,
+                            uint32_t signal_count, const struct vk_sync_signal *signals);
+
+/* Serialize every command submission on the shared device/paging queue so
+ * submissions from different contexts (e.g. two D3D11 devices) can never race
+ * each other. Wrapper over the real implementation which takes deferred_mtx
+ * internally; lock order gpu_mtx -> deferred_mtx is consistent everywhere. */
+static VkResult
 radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
                      const struct radv_winsys_submit_info *submit,
                      uint32_t wait_count, const struct vk_sync_wait *waits,
                      uint32_t signal_count, const struct vk_sync_signal *signals)
+{
+   struct radv_wddm2_ctx *ctx = radv_wddm2_ctx(_ctx);
+   simple_mtx_lock(&ctx->ws->gpu_mtx);
+   VkResult result = radv_wddm2_cs_submit_locked(_ctx, submit, wait_count, waits,
+                                                 signal_count, signals);
+   simple_mtx_unlock(&ctx->ws->gpu_mtx);
+   return result;
+}
+
+static VkResult
+radv_wddm2_cs_submit_locked(struct radeon_winsys_ctx *_ctx,
+                            const struct radv_winsys_submit_info *submit,
+                            uint32_t wait_count, const struct vk_sync_wait *waits,
+                            uint32_t signal_count, const struct vk_sync_signal *signals)
 {
    struct radv_wddm2_ctx *ctx = radv_wddm2_ctx(_ctx);
    struct radv_wddm2_queue *queue = &ctx->per_ip[submit->ip_type].queue;
@@ -884,6 +939,13 @@ radv_wddm2_cs_submit(struct radeon_winsys_ctx *_ctx,
          simple_mtx_unlock(&ctx->ws->deferred_mtx);
          return VK_ERROR_DEVICE_LOST;
       }
+
+      /* Snapshot the just-submitted IB so the watchdog can report which
+       * command stream the engine was executing when it hung. */
+      ctx->ws->last_ib_summary[queue->hw_ip].va = first_ib.va;
+      ctx->ws->last_ib_summary[queue->hw_ip].len = first_ib.cdw * 4;
+      ctx->ws->last_ib_summary[queue->hw_ip].fence_value =
+         signal_count > 0 ? signals[0].signal_value : 0;
    }
 
    if (signal_count > 0) {

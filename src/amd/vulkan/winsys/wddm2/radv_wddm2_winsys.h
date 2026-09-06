@@ -90,9 +90,27 @@ struct radv_wddm2_winsys {
    uint32_t paging_fence_h;
 
    /* GPU-alive watchdog: polls GetDeviceState every 200ms. If the engine is
-    * HUNG or RESET, kills the process immediately so DWM doesn't freeze. */
+    * HUNG or RESET, dumps execution/page-fault state and the last submitted
+    * IB per engine, then kills the process so DWM doesn't freeze. */
    HANDLE watchdog_thread;
    bool watchdog_stop;
+
+   /* Last-submitted IB summary per IP, published under deferred_mtx in the
+    * submit critical section. Read by the watchdog on HUNG/RESET to identify
+    * the command stream the engine was executing. */
+   struct {
+      uint64_t va;
+      uint32_t len;
+      uint64_t fence_value;
+   } last_ib_summary[AMD_NUM_IP_TYPES];
+
+   /* Copy of the last main GFX command stream (concatenated chained IB
+    * dwords), captured at submit time and dumped verbatim by the watchdog on a
+    * GPU hang so the offending packets can be decoded.  Cheap memcpy, so it
+    * does not perturb the repro the way full IB decoding does. */
+   uint32_t hang_capture[4096];
+   unsigned hang_capture_dw;
+   bool hang_capture_valid;
 
    /* WDDM node topology, discovered from the adapter's KMD at winsys creation.
     *
@@ -130,6 +148,13 @@ struct radv_wddm2_winsys {
    simple_mtx_t deferred_mtx;
    struct list_head deferred_list;
 
+   /* Global serialization of the D3DKMT-facing GPU path. Held across every
+    * command submission so that submissions from different contexts/devices
+    * (e.g. two D3D11 devices) can never race each other on the shared device
+    * and paging queue. Lock order: gpu_mtx -> deferred_mtx (deferred_mtx
+    * holders never take gpu_mtx). */
+   simple_mtx_t gpu_mtx;
+
    simple_mtx_t d3d_mtx;
 
    struct vk_wddm2_fence last_submission[AMD_NUM_IP_TYPES];
@@ -141,11 +166,11 @@ struct radv_wddm2_winsys {
        void *d3d12_queue;
     } wsi;
 
-    /* Representative context used for WDDM2 UpdateGpuVirtualAddress (sparse
-     * bind/unbind).  The 26.2.2 buffer_virtual_bind interface no longer passes
-     * the context/ip-type, so the first radv device context to be created is
-     * remembered here. */
-    struct radv_wddm2_ctx *default_ctx;
+     /* Representative context used for WDDM2 UpdateGpuVirtualAddress (sparse
+      * bind/unbind).  The 26.2.2 buffer_virtual_bind interface no longer passes
+      * the context/ip-type, so the first radv device context to be created is
+      * remembered here. */
+     struct radv_wddm2_ctx *default_ctx;
 };
 
 static inline struct radv_wddm2_winsys *
