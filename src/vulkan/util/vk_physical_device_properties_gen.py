@@ -185,6 +185,8 @@ vk_common_GetPhysicalDeviceProperties2(VkPhysicalDevice physicalDevice,
 {
    VK_FROM_HANDLE(vk_physical_device, pdevice, physicalDevice);
 
+   fprintf(stderr, "[RADV] vk_common_GetPhysicalDeviceProperties2: enter (pdevice=%p pNext=%p)${esc_newline}", (void*)pdevice, (void*)pProperties->pNext); fflush(stderr);
+
 % for prop in pdev_properties:
    ${copy_property("pProperties->properties.", prop.name, "pdevice->properties.", prop.actual_name, prop.decl)}
 % endfor
@@ -215,6 +217,8 @@ vk_common_GetPhysicalDeviceProperties2(VkPhysicalDevice physicalDevice,
          break;
       }
    }
+
+   fprintf(stderr, "[RADV] vk_common_GetPhysicalDeviceProperties2: exit${esc_newline}"); fflush(stderr);
 }
 
 void
@@ -382,6 +386,7 @@ def main():
         "all_properties": all_properties,
         "copy_property": copy_property,
         "SPECIALIZED_PROPERTY_STRUCTS": SPECIALIZED_PROPERTY_STRUCTS,
+        "esc_newline": "\\n",
     }
 
     try:
