@@ -1993,7 +1993,11 @@ radv_queue_init(struct radv_device *device, struct radv_queue *queue, int idx,
 
    if (queue->state.qf == RADV_QUEUE_SPARSE) {
       queue->vk.driver_submit = radv_queue_sparse_submit;
-      vk_queue_enable_submit_thread(&queue->vk);
+      /* The submit thread can only be started when the device runs in a
+       * threaded submit mode.  On a native-timeline device (immediate mode,
+       * e.g. the WDDM2 winsys) the sparse queue runs inline instead. */
+      if (vk_device_supports_threaded_submit(&device->vk))
+         vk_queue_enable_submit_thread(&queue->vk);
    } else {
       queue->vk.driver_submit = radv_queue_submit;
    }
