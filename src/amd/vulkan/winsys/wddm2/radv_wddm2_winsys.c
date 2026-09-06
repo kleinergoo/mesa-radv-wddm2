@@ -138,19 +138,35 @@ radv_wddm2_watchdog_thread(LPVOID param)
                        (unsigned long long)ws->last_ib_summary[ip].fence_value);
          }
 
-         /* Dump the captured last main GFX command stream verbatim. */
-         if (ws->hang_capture_valid) {
-            fprintf(stderr, "radv/wddm2: watchdog: last GFX CS (%u dwords):\n",
-                    ws->hang_capture_dw);
-            for (unsigned i = 0; i < ws->hang_capture_dw; i++) {
-               if (i % 8 == 0)
-                  fprintf(stderr, "radv/wddm2:   %04x:", i);
-               fprintf(stderr, " %08x", ws->hang_capture[i]);
-               if (i % 8 == 7)
+         /* Dump the captured main GFX command streams, oldest first. */
+         {
+            /* simple selection sort by stamp */
+            int order[RADV_WDDM2_HANG_RING];
+            int norder = 0;
+            for (int i = 0; i < RADV_WDDM2_HANG_RING; i++)
+               if (ws->hang_ring[i].ndw)
+                  order[norder++] = i;
+            for (int i = 0; i < norder; i++)
+               for (int j = i + 1; j < norder; j++)
+                  if (ws->hang_ring[order[j]].stamp < ws->hang_ring[order[i]].stamp) {
+                     int t = order[i]; order[i] = order[j]; order[j] = t;
+                  }
+            for (int i = 0; i < norder; i++) {
+               int s = order[i];
+               fprintf(stderr, "radv/wddm2: watchdog: GFX CS #%llu (%u dwords%s):\n",
+                       (unsigned long long)ws->hang_ring[s].stamp,
+                       ws->hang_ring[s].ndw,
+                       ws->hang_ring[s].truncated ? ", truncated" : "");
+               for (unsigned k = 0; k < ws->hang_ring[s].ndw; k++) {
+                  if (k % 8 == 0)
+                     fprintf(stderr, "radv/wddm2:   %04x:", k);
+                  fprintf(stderr, " %08x", ws->hang_ring[s].dw[k]);
+                  if (k % 8 == 7)
+                     fprintf(stderr, "\n");
+               }
+               if (ws->hang_ring[s].ndw % 8)
                   fprintf(stderr, "\n");
             }
-            if (ws->hang_capture_dw % 8)
-               fprintf(stderr, "\n");
          }
 
          TerminateProcess(GetCurrentProcess(), 1);

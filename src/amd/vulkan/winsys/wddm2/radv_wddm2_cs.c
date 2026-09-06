@@ -629,26 +629,41 @@ radv_wddm2_submit_add_cs(struct radv_wddm2_ctx *ctx, struct submit_pdd_writer *p
    else if (type == RADV_CS_DUMP_TYPE_POSTAMBLE_IBS)
       flags = 0x104;
 
-   /* Keep a verbatim copy of the last main GFX command stream so a GPU hang
+   /* Keep a verbatim copy of the last main GFX command streams so a GPU hang
     * can be decoded post-mortem (see watchdog). */
    if (type == RADV_CS_DUMP_TYPE_MAIN_IBS && cs->hw_ip == AMD_IP_GFX) {
       struct radv_wddm2_winsys *ws = ctx->ws;
-      unsigned cap_dw = ARRAY_SIZE(ws->hang_capture);
+      struct radv_wddm2_hang_slot *r = &ws->hang_ring[ws->hang_ring_next];
       unsigned total = 0;
-      ws->hang_capture_valid = false;
-      for (unsigned i = 0; i < cs->num_ib_buffers && total < cap_dw; i++) {
+      for (unsigned i = 0; i < cs->num_ib_buffers && total < RADV_WDDM2_HANG_CAP_DW; i++) {
          struct radv_winsys_ib *ib = &cs->ib_buffers[i];
          struct radeon_winsys_bo *bo = ib->bo;
+         /* Only read dwords that provably live inside the BO mapping. */
+         if (ib->va < bo->va || bo->size == 0)
+            break;
+         uint64_t off = ib->va - bo->va;
+         if (off > bo->size)
+            break;
+         uint64_t avail_dw = (bo->size - off) / 4;
+         if (avail_dw == 0)
+            break;
          void *map = radv_buffer_map(cs->ws, bo);
          if (!map)
             break;
-         const uint32_t *src = (const uint32_t *)((const char *)map + (ib->va - bo->va));
-         unsigned ndw = MIN2(ib->cdw, cap_dw - total);
-         memcpy(&ws->hang_capture[total], src, ndw * sizeof(uint32_t));
+         unsigned ndw = MIN2(MIN2(ib->cdw, (unsigned)avail_dw),
+                             RADV_WDDM2_HANG_CAP_DW - total);
+         if (ndw == 0)
+            break;
+         const uint32_t *src = (const uint32_t *)((const char *)map + off);
+         memcpy(&r->dw[total], src, ndw * sizeof(uint32_t));
          total += ndw;
       }
-      ws->hang_capture_dw = total;
-      ws->hang_capture_valid = total > 0;
+      if (total > 0) {
+         r->ndw = total;
+         r->truncated = total == RADV_WDDM2_HANG_CAP_DW;
+         r->stamp = ++ws->hang_ring_stamp;
+         ws->hang_ring_next = (ws->hang_ring_next + 1) % RADV_WDDM2_HANG_RING;
+      }
    }
 
 for (unsigned i = 0; i < num_ib_buffers; i++) {

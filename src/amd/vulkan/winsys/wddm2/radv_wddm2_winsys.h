@@ -57,6 +57,20 @@ struct radv_wddm2_last_ib {
    uint32_t ib_buf[4096];
 };
 
+/* Ring of the last N main GFX command streams, captured verbatim at submit
+ * time (cheap memcpy; does not perturb the repro like IB decoding does).
+ * The GPU stalls on a real frame, but post-stall marker submissions keep
+ * coming and overwrite a single-slot capture, so keep several: on a hang the
+ * watchdog dumps the whole ring and the offending draw is in there. */
+#define RADV_WDDM2_HANG_RING 8
+#define RADV_WDDM2_HANG_CAP_DW 8192
+struct radv_wddm2_hang_slot {
+   uint64_t stamp;      /* monotonic push counter, for chronological dump */
+   uint32_t dw[RADV_WDDM2_HANG_CAP_DW];
+   unsigned ndw;
+   bool truncated;
+};
+
 struct vk_device;
 void radv_wddm2_notify_fence_destroyed(void *winsys, struct vk_device *device,
                                        uint32_t handle, uint64_t *value_map);
@@ -104,13 +118,14 @@ struct radv_wddm2_winsys {
       uint64_t fence_value;
    } last_ib_summary[AMD_NUM_IP_TYPES];
 
-   /* Copy of the last main GFX command stream (concatenated chained IB
-    * dwords), captured at submit time and dumped verbatim by the watchdog on a
-    * GPU hang so the offending packets can be decoded.  Cheap memcpy, so it
-    * does not perturb the repro the way full IB decoding does. */
-   uint32_t hang_capture[4096];
-   unsigned hang_capture_dw;
-   bool hang_capture_valid;
+   /* Ring of the last N main GFX command streams, captured verbatim at submit
+    * time (cheap memcpy; does not perturb the repro like IB decoding does).
+    * The GPU stalls on a real frame, but post-stall marker submissions keep
+    * coming and overwrite a single-slot capture, so keep several: on a hang the
+    * watchdog dumps the whole ring and the offending draw is in there. */
+   struct radv_wddm2_hang_slot hang_ring[RADV_WDDM2_HANG_RING];
+   unsigned hang_ring_next;
+   uint64_t hang_ring_stamp;
 
    /* WDDM node topology, discovered from the adapter's KMD at winsys creation.
     *
